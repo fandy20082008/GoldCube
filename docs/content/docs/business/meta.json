@@ -1,0 +1,14 @@
+{
+  "title": "许可与上游资料",
+  "root": true,
+  "defaultOpen": true,
+  "pages": [
+    "commercial-launch",
+    "license",
+    "commercial-license",
+    "disclaimer",
+    "legal-notice",
+    "cla",
+    "business"
+  ]
+}

@@ -1,0 +1,9 @@
+* @fandy20082008
+
+/.github/ @fandy20082008
+/Dockerfile @fandy20082008
+/docker-compose*.yml @fandy20082008
+/web/src/app/api/ @fandy20082008
+/web/src/lib/auth/ @fandy20082008
+/web/src/lib/server/ @fandy20082008
+/docs/content/docs/backend/ @fandy20082008

@@ -1,0 +1,42 @@
+name: Source provenance
+run-name: 旧基线或公开快照来源证据 · ${{ github.ref_name }}
+
+on:
+  push:
+    branches: ["main", "goldcube-custom"]
+    tags: ["v*", "VOZEB-PRO-v*", "goldcube-v*"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Git baseline evidence (not a complete licence audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout complete available history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Verify checker failure fixtures
+        run: node --test scripts/check-source-baseline.test.mjs
+      - name: Verify upgrade intake failure fixtures
+        run: python3 -B scripts/prepare-upgrade.test.py
+      - name: Verify manual release record fixtures
+        run: node --test scripts/check-goldcube-release.test.mjs
+      - name: Verify public snapshot failure fixtures
+        run: node --test scripts/check-public-snapshot.test.mjs
+      - name: Verify committed source history or trusted public snapshot
+        env:
+          GOLDCUBE_SOURCE_MODE: ${{ vars.GOLDCUBE_SOURCE_MODE }}
+          GOLDCUBE_SNAPSHOT_PROOF: ${{ vars.GOLDCUBE_SNAPSHOT_PROOF }}
+          GOLDCUBE_SNAPSHOT_PROOF_SHA256: ${{ vars.GOLDCUBE_SNAPSHOT_PROOF_SHA256 }}
+        run: node scripts/check-source-provenance.mjs

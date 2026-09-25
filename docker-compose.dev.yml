@@ -1,0 +1,89 @@
+# VOZEB PRO 开发环境 compose
+# - 复用现有的生产镜像作为 base（已有 sharp/ffmpeg/node_modules）
+# - 挂载 web 源码覆盖容器内的编译产物
+# - 入口脚本自动安装 pnpm 和缺失的 dev 依赖
+# - 端口 3301 避免与生产 3300 冲突
+# - 数据库和 worker 容器复用 docker-compose.yml 的定义
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    container_name: vozeb-pro-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vozeb_pro}
+      POSTGRES_USER: ${POSTGRES_USER:-vozeb_pro}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中配置 POSTGRES_PASSWORD}
+    volumes:
+      - vozeb-pro-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-vozeb_pro} -d ${POSTGRES_DB:-vozeb_pro}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - vozeb-dev
+
+  app:
+    # 复用生产镜像的 native deps (sharp, ffmpeg, fonts) 和 node_modules
+    image: ${VOZEB_PRO_IMAGE:-ghcr.io/csyqlz/vozeb-pro:v0.0.7}
+    container_name: vozeb-pro-dev
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:3301:3000"
+    volumes:
+      # 挂载 web 源码覆盖 /app/web/src 等所有源代码
+      - ./web:/app/web
+      # 数据目录独立保留
+      - vozeb-pro-dev-data:/app/web/.data
+      # 显式 anonymous volume 保留容器内 node_modules,
+      # 避免 bind mount 把 production deps 覆盖掉. 容器首次启动 entrypoint 会自动 pnpm install --prod=false 补 dev deps.
+      - /app/web/node_modules
+      - /app/web/.next-dev
+    environment:
+      NEXT_TELEMETRY_DISABLED: "1"
+      VOZEB_PRO_DATA_DIR: /app/web/.data
+      VOZEB_PRO_INTERNAL_ORIGIN: http://127.0.0.1:3000
+      VOZEB_PRO_DATABASE_PROVIDER: postgres
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vozeb_pro}
+      VOZEB_PRO_DATABASE_POOL_MAX: ${VOZEB_PRO_DATABASE_POOL_MAX:-10}
+      VOZEB_PRO_DATABASE_SSL: "0"
+      VOZEB_PRO_ENCRYPTION_KEY: ${VOZEB_PRO_ENCRYPTION_KEY:?请在 .env 中配置 VOZEB_PRO_ENCRYPTION_KEY}
+      VOZEB_PRO_INSTALL_TOKEN: ${VOZEB_PRO_INSTALL_TOKEN:?请在 .env 中配置至少 32 位一次性安装令牌}
+      VOZEB_PRO_MAINTENANCE_TOKEN: ${VOZEB_PRO_MAINTENANCE_TOKEN:?请在 .env 中配置至少 32 位维护令牌}
+      VOZEB_PRO_WORKER_TOKEN: ${VOZEB_PRO_WORKER_TOKEN:?请在 .env 中配置独立的至少 32 位 Worker 令牌}
+      # dev mode 配置
+      NEXT_DIST_DIR: .next-dev
+    entrypoint: ["/bin/sh", "/app/web/scripts/dev-entrypoint.sh"]
+    user: "0:0"  # dev mode 用 root 跑, 才能 chown 写入 bind mount 目录
+    mem_limit: 6g  # pnpm install 需要 ~3GB, 加 6GB 留 buffer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - vozeb-dev
+
+volumes:
+  vozeb-pro-dev-data:
+  vozeb-pro-postgres:
+
+networks:
+  vozeb-dev:
+    driver: bridge

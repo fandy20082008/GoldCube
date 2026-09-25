@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" role="img" aria-label="金立方 GoldCube logo">
+  <defs>
+    <linearGradient id="cubeLine" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6E56F8"/><stop offset="1" stop-color="#4F8CFF"/></linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#cubeLine)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M200 38 365 130 200 224 35 130 200 38Z"/>
+    <path d="M35 130v176l165 92 165-92V130"/>
+    <path d="M200 224v174"/>
+    <path d="M35 130l165 94 165-94"/>
+  </g>
+</svg>

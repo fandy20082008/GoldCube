@@ -1,0 +1,269 @@
+{
+  "schemaVersion": 1,
+  "prebuildRecordSha256": "",
+  "releaseTag": "goldcube-v0.0.7-custom.N",
+  "workflowCommit": "REQUIRED_FULL_APP_COMMIT",
+  "applicationRepository": "fandy20082008/GoldCube",
+  "sourceNotices": {
+    "fandy20082008/GoldCube": { "licenseUrl": "", "noticesUrl": "", "buildUrl": "" },
+    "fandy20082008/GoldCube-Gateway": { "licenseUrl": "", "noticesUrl": "", "buildUrl": "" }
+  },
+  "imageTargets": {
+    "app": "",
+    "docs": ""
+  },
+  "components": {
+    "app": {
+      "repository": "fandy20082008/GoldCube",
+      "commit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchive": {
+        "url": "",
+        "sha256": ""
+      },
+      "review": {
+        "reviewer": "",
+        "reviewedAt": "",
+        "checks": {
+          "provenance": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "secrets": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "publicBuild": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceDownload": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceCompleteness": {
+            "status": "unknown",
+            "evidence": ""
+          }
+        }
+      }
+    },
+    "frontend": {
+      "repository": "fandy20082008/GoldCube",
+      "commit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchive": {
+        "url": "",
+        "sha256": ""
+      },
+      "review": {
+        "reviewer": "",
+        "reviewedAt": "",
+        "checks": {
+          "provenance": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "secrets": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "publicBuild": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceDownload": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceCompleteness": {
+            "status": "unknown",
+            "evidence": ""
+          }
+        }
+      }
+    },
+    "worker": {
+      "repository": "fandy20082008/GoldCube",
+      "commit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchive": {
+        "url": "",
+        "sha256": ""
+      },
+      "review": {
+        "reviewer": "",
+        "reviewedAt": "",
+        "checks": {
+          "provenance": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "secrets": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "publicBuild": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceDownload": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceCompleteness": {
+            "status": "unknown",
+            "evidence": ""
+          }
+        }
+      }
+    },
+    "proxy": {
+      "repository": "fandy20082008/GoldCube-Gateway",
+      "commit": "REQUIRED_FULL_PROXY_COMMIT",
+      "sourceArchive": {
+        "url": "",
+        "sha256": ""
+      },
+      "review": {
+        "reviewer": "",
+        "reviewedAt": "",
+        "checks": {
+          "provenance": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "secrets": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "publicBuild": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceDownload": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceCompleteness": {
+            "status": "unknown",
+            "evidence": ""
+          }
+        }
+      },
+      "releaseGate": {
+        "status": "unknown",
+        "sourceCommit": "REQUIRED_FULL_PROXY_COMMIT",
+        "recordSha256": "",
+        "reportUrl": ""
+      }
+    },
+    "docs": {
+      "repository": "fandy20082008/GoldCube",
+      "commit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchive": {
+        "url": "",
+        "sha256": ""
+      },
+      "review": {
+        "reviewer": "",
+        "reviewedAt": "",
+        "checks": {
+          "provenance": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "secrets": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "publicBuild": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceDownload": {
+            "status": "unknown",
+            "evidence": ""
+          },
+          "sourceCompleteness": {
+            "status": "unknown",
+            "evidence": ""
+          }
+        }
+      }
+    }
+  },
+  "artifacts": {
+    "app": {
+      "repository": "fandy20082008/GoldCube",
+      "sourceCommit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    },
+    "frontend": {
+      "repository": "fandy20082008/GoldCube",
+      "sourceCommit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    },
+    "worker": {
+      "repository": "fandy20082008/GoldCube",
+      "sourceCommit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    },
+    "docs": {
+      "repository": "fandy20082008/GoldCube",
+      "sourceCommit": "REQUIRED_FULL_APP_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    },
+    "proxy": {
+      "repository": "fandy20082008/GoldCube-Gateway",
+      "sourceCommit": "REQUIRED_FULL_PROXY_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    },
+    "shell": {
+      "repository": "fandy20082008/GoldCube-Gateway",
+      "sourceCommit": "REQUIRED_FULL_PROXY_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    },
+    "assets": {
+      "repository": "fandy20082008/GoldCube-Gateway",
+      "sourceCommit": "REQUIRED_FULL_PROXY_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    },
+    "deployment": {
+      "repository": "fandy20082008/GoldCube-Gateway",
+      "sourceCommit": "REQUIRED_FULL_PROXY_COMMIT",
+      "sourceArchiveSha256": "",
+      "digest": "",
+      "uri": "",
+      "verificationEvidence": ""
+    }
+  },
+  "deploymentApproval": {
+    "decision": "unknown",
+    "reviewer": "",
+    "evidence": ""
+  },
+  "approval": {
+    "decision": "unknown",
+    "reviewer": "",
+    "evidence": ""
+  }
+}

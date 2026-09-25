@@ -1,0 +1,148 @@
+---
+title: Docker 部署
+description: 从固定 GoldCube 源码使用 Docker Compose 和 PostgreSQL 部署
+---
+
+# Docker 部署
+
+GoldCube 主应用 Compose 会启动 VOZEB PRO、生成 Worker 和 PostgreSQL。当前二开版本尚未发布可验证的公开标签或镜像；本页只说明未来审核发布后的固定源码构建方式，不表示现有候选已获生产部署批准。主 Compose 的默认镜像指向原版上游，不能用它部署 GoldCube 二开。
+
+## 安装
+
+```bash
+git clone https://github.com/fandy20082008/GoldCube.git
+cd GoldCube
+GOLDCUBE_RELEASE_TAG="从正式发布清单填写的精确标签"
+git fetch origin tag "$GOLDCUBE_RELEASE_TAG"
+git checkout --detach "tags/$GOLDCUBE_RELEASE_TAG"
+cp .env.example .env
+```
+
+发布后从主应用站点的 `/open-source` 页面核对应用与 [GoldCube-Gateway](https://github.com/fandy20082008/GoldCube-Gateway) 的精确提交、源码归档哈希和实际制品，再填入正式标签。当前公开仓库/标签未完成发布审核时，不使用浮动 `main`、上游旧镜像或未核实的标签代替对应源码。
+
+必填：
+
+```dotenv
+NEXT_PUBLIC_SITE_URL=https://vozeb-pro.example.com
+POSTGRES_PASSWORD=replace-with-a-strong-database-password
+VOZEB_PRO_ENCRYPTION_KEY=填写 openssl rand -hex 32 的输出
+VOZEB_PRO_INSTALL_TOKEN=填写至少32字符的独立安装令牌
+VOZEB_PRO_MAINTENANCE_TOKEN=填写至少32字符的独立维护令牌
+VOZEB_PRO_WORKER_TOKEN=填写至少32字符且不同于维护令牌的Worker令牌
+```
+
+从本仓固定源码构建并启动：
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build
+docker compose ps
+```
+
+访问 `/install`，先确认只读连接检查，再点击“初始化表结构”并创建管理员。
+
+## Compose 服务
+
+```text
+postgres          -> PostgreSQL 16，数据卷 vozeb-pro-postgres
+app               -> 本地构建的 VOZEB PRO standalone，数据卷 vozeb-pro-data
+generation-worker -> 与 app 相同的本地镜像
+```
+
+应用通过容器网络连接：
+
+```text
+postgres://用户:密码@postgres:5432/数据库
+```
+
+不要把 Docker 内数据库 Host 写成 localhost。
+
+## 外部数据库与宝塔
+
+外部 PostgreSQL 不启动内置数据库；先构建本地镜像，再启动 app 与 generation-worker，应用端口绑定在宿主机回环地址：
+
+```bash
+docker build -t vozeb-pro:local .
+VOZEB_PRO_IMAGE=vozeb-pro:local docker compose -f docker-compose.external-db.yml up -d
+```
+
+宝塔 PostgreSQL 通常监听宿主机 `127.0.0.1:5432`。此时使用：
+
+```dotenv
+DATABASE_URL=postgres://用户:密码@127.0.0.1:5432/数据库
+```
+
+```bash
+VOZEB_PRO_IMAGE=vozeb-pro:local docker compose -f docker-compose.baota.yml up -d
+```
+
+宝塔 Compose 使用 host 网络，启动 app 与 generation-worker，不创建项目 PostgreSQL 容器。应用直接监听主机端口，须由防火墙与反向代理控制访问；外部数据库 Compose 的 3000 端口只绑定 `127.0.0.1`，由 Nginx 或宝塔反向代理对外提供 HTTPS。
+
+宝塔单层 Nginx 反向代理默认使用 `VOZEB_PRO_TRUSTED_PROXY_HOPS=1`，用于登录、生成和媒体访问的真实 IP 限流。接入 CDN 或额外代理时按可信代理层数调整；只有客户端直接访问应用时才设置为 `0`。
+
+## 本地构建镜像
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+构建阶段需要安装依赖并执行 Next.js 生产构建；建议在资源充足的隔离 Linux 构建环境中完成，再按正式清单验证制品。尚无经过批准的 GoldCube 发布镜像可用，不要回退拉取默认上游镜像。
+
+## 日志与检查
+
+```bash
+docker compose logs -f app
+docker compose logs -f postgres
+docker compose exec postgres pg_isready -U vozeb_pro -d vozeb_pro
+```
+
+安装页报数据库错误时，重点检查 `.env`、PostgreSQL 健康状态、数据库密码和 Host。浏览器只显示安全分类提示，完整连接错误保留在服务器日志。
+
+## 未来发布镜像的 GHCR 权限
+
+只有发布清单登记了经过审核的精确镜像 digest，才可按对应版本拉取；公开镜像无需登录，私有镜像需要登录：
+
+```bash
+echo "GitHub Token" | docker login ghcr.io -u GitHub用户名 --password-stdin
+docker pull "ghcr.io/仓库所有者/镜像名@sha256:清单中的64位摘要"
+```
+
+Token 不得写入仓库或公开日志。
+
+## HTTPS 反向代理
+
+反向代理应保留 `Host`、`X-Forwarded-Proto` 和 `X-Forwarded-For`。站点地址使用真实 HTTPS 域名：
+
+```dotenv
+NEXT_PUBLIC_SITE_URL=https://vozeb-pro.example.com
+```
+
+仓库提供 `deploy/nginx/vozeb-pro.conf.example` 作为宝塔/Nginx 生产模板。替换域名和证书路径后再启用；模板已为 HTTPS 开启 HTTP/2，为 JS、CSS、JSON 和 SVG 启用 gzip，并给 `/_next/static/` 哈希资源设置一年不可变缓存。默认不写 Brotli 指令，因为只有服务器已安装对应 Nginx 模块时才能启用。
+
+重载前先验证配置，并在正式域名检查实际传输：
+
+```bash
+nginx -t
+curl --http2 -I -H 'Accept-Encoding: gzip' https://vozeb-pro.example.com/_next/static/实际文件.js
+```
+
+响应应使用 HTTP/2，包含 `Content-Encoding: gzip` 和 `Cache-Control: public, max-age=31536000, immutable`。若经过 CDN，还要在 CDN 回源与客户端两侧分别检查，避免 CDN 解压后回传原始大文件。
+
+## 更新
+
+先备份 PostgreSQL 和 `vozeb-pro-data`，再从新发布清单核对两仓对应源码与镜像摘要。在新的固定标签源码目录执行：
+
+```bash
+GOLDCUBE_RELEASE_TAG="从新发布清单填写的精确标签"
+git fetch origin tag "$GOLDCUBE_RELEASE_TAG"
+git checkout --detach "tags/$GOLDCUBE_RELEASE_TAG"
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+此本地构建示例不代替两仓制品绑定和生产发布门禁。不要执行 `docker compose down -v`。
+
+## 数据卷
+
+- `vozeb-pro-postgres`：PostgreSQL 主库。
+- `vozeb-pro-data`：服务器媒体副本、文件模式数据和运行期文件。
+
+Canvas、“我的素材”、短剧和工作台记录保存在 PostgreSQL，媒体位于 `vozeb-pro-data` 数据卷。生产备份必须同时覆盖 PostgreSQL 与该数据卷。
