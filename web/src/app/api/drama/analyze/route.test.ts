@@ -100,6 +100,32 @@ describe("POST /api/drama/analyze", () => {
         expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
     });
 
+    it.each([false, true])("records a server-generated correlation ID and sanitized terminal event (failed=%s)", async (failed) => {
+        const log = vi.spyOn(console, "info").mockImplementation(() => {});
+        if (failed) mocks.requestStructuredText.mockRejectedValue(Object.assign(new Error("private-upstream-message"), { status: 504, retryable: false, reason: "transport" }));
+        try {
+            const response = await POST(
+                new Request("http://localhost/api/drama/analyze", {
+                    method: "POST",
+                    headers: { "content-type": "application/json", "x-vozeb-stream-response": "1", cookie: "private-cookie" },
+                    body: JSON.stringify({ requestId: "private-client-id", phase: "content", script: "灰黑色风暴扫过废墟。" }),
+                }),
+            );
+            const payload = await response.json();
+            expect(payload.code).toBe(failed ? 502 : 0);
+            expect(payload.analysisId).toMatch(/^[\da-f-]{36}$/);
+            const events = log.mock.calls.filter(([message]) => message === "[drama-analyze]").map(([, value]) => JSON.parse(value));
+            expect(events).toEqual([
+                { analysisId: payload.analysisId, phase: "content", event: "started", elapsedMs: expect.any(Number) },
+                { analysisId: payload.analysisId, phase: "content", event: failed ? "failed" : "succeeded", elapsedMs: expect.any(Number), ...(failed ? { errorClass: "timeout" } : {}) },
+            ]);
+            expect(JSON.stringify(events)).not.toMatch(/private-|灰黑色|user-one|secret/);
+            expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
+        } finally {
+            log.mockRestore();
+        }
+    });
+
     it("does not switch candidates or split the script after a non-retryable body timeout", async () => {
         mocks.resolveLogicalModelCandidates.mockReturnValue([
             { channel: { id: "text-one" }, channelId: "text-one", upstreamModel: "model-one" },
@@ -116,6 +142,42 @@ describe("POST /api/drama/analyze", () => {
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toMatchObject({ code: 502, msg: "body timeout" });
         expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
+        expect(mocks.refundUserPoints).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ["content", 502],
+        ["content", 408],
+        ["content", 429],
+        ["visual", 502],
+        ["visual", 408],
+        ["visual", 429],
+    ])("does not resubmit %s through a second candidate after a complete HTTP %s error", async (phase, status) => {
+        mocks.resolveLogicalModelCandidates.mockReturnValue([
+            { channel: { id: "text-one" }, channelId: "text-one", upstreamModel: "model-one" },
+            { channel: { id: "text-two" }, channelId: "text-two", upstreamModel: "model-two" },
+        ]);
+        mocks.requestStructuredText.mockRejectedValue(Object.assign(new Error(`upstream HTTP ${status}`), { status, retryable: true, reason: "http" }));
+        const response = await POST(
+            new Request("http://localhost/api/drama/analyze", {
+                method: "POST",
+                headers: { "content-type": "application/json", "x-vozeb-stream-response": "1" },
+                body: JSON.stringify({
+                    requestId: `no-resubmit-${phase}-${status}`,
+                    phase,
+                    script: "第一段。\n\n第二段。",
+                    shots: [
+                        { id: "shot-one", sourceText: "第一段。" },
+                        { id: "shot-two", sourceText: "第二段。" },
+                    ],
+                }),
+            }),
+        );
+
+        await expect(response.json()).resolves.toMatchObject({ code: 502, msg: `upstream HTTP ${status}` });
+        expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
+        expect(mocks.requestStructuredText.mock.calls[0][0]).toMatchObject({ candidate: { channelId: "text-one" }, preferNativeTools: false, allowRepair: false });
+        // Complete HTTP failures are refunded by the proxy, not again here.
         expect(mocks.refundUserPoints).not.toHaveBeenCalled();
     });
 

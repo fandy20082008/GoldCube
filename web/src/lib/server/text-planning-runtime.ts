@@ -262,7 +262,8 @@ async function requestTextProtocol(input: StructuredTextRequest, request: Protoc
         return await fetchInternalApi(`${base}${normalizePath(request.path)}`, { method: "POST", headers, body: JSON.stringify(request.body), cache: "no-store", signal });
     } catch (error) {
         if (input.signal?.aborted) throw error;
-        throw new TextPlanningRequestError(isTimeoutError(error) ? "文本模型规划响应超时，正在切换备用渠道" : "文本模型渠道暂时无法连接", 504, true, "transport");
+        const timeout = isTimeoutError(error);
+        throw new TextPlanningRequestError(timeout ? "文本模型响应超过请求超时设置，未收到完整结果，请管理员检查模型请求超时" : "文本模型渠道连接中断，未收到完整结果，请稍后重试", timeout ? 504 : 502, false, "transport");
     }
 }
 
@@ -284,14 +285,10 @@ function scopeProtocolIdempotency(headers: Headers, protocol: TextPlanningProtoc
 }
 
 async function readStructuredResponse(input: StructuredTextRequest, request: ProtocolRequest, response: Response, startedAt: number): Promise<TextPlanningCall> {
-    if (!response.ok) {
-        const raw = await response.text();
-        throw new TextPlanningRequestError(safeUpstreamError(raw, response.status), response.status, retryableStatus(response.status));
-    }
     const streamed = request.stream ? createStreamAccumulator(request.protocol, input.tool.name, request.resultField, input.allowNaturalLanguage) : undefined;
     let body: string | { raw: string; arguments: string };
     try {
-        body = request.stream ? await readResponseBody(response, streamed) : await response.text();
+        body = response.ok && request.stream ? await readResponseBody(response, streamed) : await response.text();
     } catch (error) {
         await input.onInvalidResponse?.(response.headers);
         if (input.signal?.aborted) throw error;
@@ -300,6 +297,7 @@ async function readStructuredResponse(input: StructuredTextRequest, request: Pro
         throw new TextPlanningRequestError(timeout ? "文本模型响应超过请求超时设置，未收到完整结果，请管理员检查模型请求超时" : "文本模型响应中断，未收到完整结果，请稍后重试", timeout ? 504 : 502, false, "transport");
     }
     const raw = typeof body === "string" ? body : body.raw;
+    if (!response.ok) throw new TextPlanningRequestError(safeUpstreamError(raw, response.status), response.status, retryableStatus(response.status));
     let payload: Record<string, unknown> | null = null;
     try {
         const parsed = JSON.parse(raw.replace(/^\uFEFF/u, "").trim());

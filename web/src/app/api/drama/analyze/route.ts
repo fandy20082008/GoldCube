@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth/session";
@@ -54,6 +55,24 @@ async function analyzeRequest(request: Request, signal = request.signal) {
     const durationPolicy = resolveDramaVideoDurationPolicy(videoCandidates, settings.generationDefaults.videoSeconds, settings.generationPointMultipliers?.videoSeconds);
     const durationInstruction = phase === "content" ? dramaShotDurationInstruction(durationPolicy) : "";
 
+    const analysisId = randomUUID();
+    const startedAt = Date.now();
+    const logAnalysis = (event: "started" | "succeeded" | "failed", error?: unknown) => {
+        const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+        const errorClass = signal.aborted
+            ? "cancelled"
+            : status === 504 || (error instanceof Error && error.name === "TimeoutError")
+              ? "timeout"
+              : isStructuredTextFailure(error)
+                ? "invalid-structure"
+                : error && typeof error === "object" && "reason" in error && error.reason === "transport"
+                  ? "transport"
+                  : status >= 400
+                    ? "upstream-http"
+                    : "analysis";
+        console.info("[drama-analyze]", JSON.stringify({ analysisId, phase, event, elapsedMs: Date.now() - startedAt, ...(event === "failed" ? { errorClass } : {}) }));
+    };
+    logAnalysis("started");
     let refundedPointsRemaining: number | undefined;
     try {
         const tool = phase === "visual" ? dramaVisualTool : dramaContentTool;
@@ -69,77 +88,75 @@ async function analyzeRequest(request: Request, signal = request.signal) {
             },
             { role: "user", content: JSON.stringify(batchInput) },
         ];
-        let latestError: unknown;
-        for (const candidate of rankTextPlanningCandidates(candidates.map((candidate) => ({ ...candidate, channelId: candidate.channel.id })))) {
-            try {
-                if (phase === "visual") {
-                    const result = await analyzeDramaVisualBatches({
-                        input: visualInput!,
-                        requestBatch: async (batch) => {
-                            const call = await requestFunctionCall(
-                                resolveInternalOrigin(new URL(request.url).origin),
-                                request.headers.get("cookie") || "",
-                                candidate,
-                                model,
-                                messagesFor(batch.payload),
-                                user.id,
-                                tool,
-                                visualBatchIdempotencyKey(user.id, requestId, candidate, batch),
-                                undefined,
-                                false,
-                                signal,
-                                (pointsBalance) => {
-                                    if (typeof pointsBalance === "number") refundedPointsRemaining = pointsBalance;
-                                },
-                            );
-                            return { value: JSON.parse(call.args), call };
+        const [candidate] = rankTextPlanningCandidates(candidates.map((candidate) => ({ ...candidate, channelId: candidate.channel.id })));
+        if (!candidate) throw new Error("没有可用的文本模型渠道");
+        // A failed analysis may already have reached the paid upstream. Only
+        // an explicit user action may submit it again through another channel.
+        if (phase === "visual") {
+            const result = await analyzeDramaVisualBatches({
+                input: visualInput!,
+                requestBatch: async (batch) => {
+                    const call = await requestFunctionCall(
+                        resolveInternalOrigin(new URL(request.url).origin),
+                        request.headers.get("cookie") || "",
+                        candidate,
+                        model,
+                        messagesFor(batch.payload),
+                        user.id,
+                        tool,
+                        visualBatchIdempotencyKey(user.id, requestId, candidate, batch),
+                        undefined,
+                        false,
+                        signal,
+                        (pointsBalance) => {
+                            if (typeof pointsBalance === "number") refundedPointsRemaining = pointsBalance;
                         },
-                        releaseCall: async (call) => {
-                            if (hasSystemAiCharge(call)) refundedPointsRemaining = (await refund(user.id, model, call))?.pointsBalance;
-                        },
-                        shouldSplitError: isAdaptiveVisualBatchError,
-                    });
-                    if (result.data.shots.length !== visualInput!.shotIds.length) throw new Error("模型没有为全部镜头生成视觉结构");
-                    const response = NextResponse.json({ code: 0, data: result.data, msg: "视觉结构已生成" });
-                    const pointsRemaining = result.calls
-                        .map((call) => call.pointsRemaining)
-                        .filter((value): value is number => typeof value === "number")
-                        .at(-1);
-                    if (typeof pointsRemaining === "number") response.headers.set("x-vozeb-pro-points-remaining", String(pointsRemaining));
-                    return response;
-                }
-                const result = await analyzeDramaContentCandidate({
-                    origin: resolveInternalOrigin(new URL(request.url).origin),
-                    cookie: request.headers.get("cookie") || "",
-                    candidate,
-                    model,
-                    tool,
-                    requestId,
-                    script,
-                    summary: dramaAnalysisText(body.summary),
-                    userId: user.id,
-                    durationPolicy,
-                    messagesFor,
-                    signal,
-                    onRefund: (pointsBalance) => {
-                        if (typeof pointsBalance === "number") refundedPointsRemaining = pointsBalance;
-                    },
-                });
-                const response = NextResponse.json({ code: 0, data: result.data, msg: "内容结构待审核" });
-                const pointsRemaining = result.calls
-                    .map((call) => call.pointsRemaining)
-                    .filter((value): value is number => typeof value === "number")
-                    .at(-1);
-                if (typeof pointsRemaining === "number") response.headers.set("x-vozeb-pro-points-remaining", String(pointsRemaining));
-                return response;
-            } catch (error) {
-                latestError = error;
-                if (!shouldTryAnotherTextCandidate(error)) break;
-            }
+                    );
+                    return { value: JSON.parse(call.args), call };
+                },
+                releaseCall: async (call) => {
+                    if (hasSystemAiCharge(call)) refundedPointsRemaining = (await refund(user.id, model, call))?.pointsBalance;
+                },
+                shouldSplitError: isAdaptiveVisualBatchError,
+            });
+            if (result.data.shots.length !== visualInput!.shotIds.length) throw new Error("模型没有为全部镜头生成视觉结构");
+            logAnalysis("succeeded");
+            const response = NextResponse.json({ code: 0, data: result.data, msg: "视觉结构已生成", analysisId });
+            const pointsRemaining = result.calls
+                .map((call) => call.pointsRemaining)
+                .filter((value): value is number => typeof value === "number")
+                .at(-1);
+            if (typeof pointsRemaining === "number") response.headers.set("x-vozeb-pro-points-remaining", String(pointsRemaining));
+            return response;
         }
-        throw latestError instanceof Error ? latestError : new Error("没有可用的文本模型渠道");
+        const result = await analyzeDramaContentCandidate({
+            origin: resolveInternalOrigin(new URL(request.url).origin),
+            cookie: request.headers.get("cookie") || "",
+            candidate,
+            model,
+            tool,
+            requestId,
+            script,
+            summary: dramaAnalysisText(body.summary),
+            userId: user.id,
+            durationPolicy,
+            messagesFor,
+            signal,
+            onRefund: (pointsBalance) => {
+                if (typeof pointsBalance === "number") refundedPointsRemaining = pointsBalance;
+            },
+        });
+        logAnalysis("succeeded");
+        const response = NextResponse.json({ code: 0, data: result.data, msg: "内容结构待审核", analysisId });
+        const pointsRemaining = result.calls
+            .map((call) => call.pointsRemaining)
+            .filter((value): value is number => typeof value === "number")
+            .at(-1);
+        if (typeof pointsRemaining === "number") response.headers.set("x-vozeb-pro-points-remaining", String(pointsRemaining));
+        return response;
     } catch (error) {
-        const response = NextResponse.json({ code: 502, data: null, msg: error instanceof Error ? error.message : "剧本分析失败" }, { status: 502 });
+        logAnalysis("failed", error);
+        const response = NextResponse.json({ code: 502, data: null, msg: error instanceof Error ? error.message : "剧本分析失败", analysisId }, { status: 502 });
         if (typeof refundedPointsRemaining === "number") response.headers.set("x-vozeb-pro-points-remaining", String(refundedPointsRemaining));
         return response;
     }
@@ -153,13 +170,6 @@ function isAdaptiveVisualBatchError(error: unknown) {
     const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
     const message = error instanceof Error ? error.message : "";
     return status === 413 || isStructuredTextFailure(error) || message === "模型没有返回所需的结构化结果" || message === "模型没有返回结构化剧本结果";
-}
-
-function shouldTryAnotherTextCandidate(error: unknown) {
-    if (isStructuredTextFailure(error)) return false;
-    if (error && typeof error === "object" && "retryable" in error && error.retryable === false) return false;
-    const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
-    return status >= 500 || status === 408 || status === 429;
 }
 
 async function requestFunctionCall(

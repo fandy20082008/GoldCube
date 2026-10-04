@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Short-drama analysis now retains failure details per episode and stage. Interrupted text requests avoid automatic resubmission, preserve refund identity, and emit sanitized analysis diagnostics.
+
 - 开源复核 10：修复 Gateway 规范归档的 Git 换行配置依赖；按老板确认落实其自有代码 AGPL-3.0-only 许可和第三方声明，建立逐文件权利/隐私处理表。材料与历史未知项仍阻断公开，未部署。
 
 - Homepage: add English main-application license and dual-repository GitHub links after the existing copyright (local, not deployed).

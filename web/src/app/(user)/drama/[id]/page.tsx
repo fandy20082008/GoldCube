@@ -21,6 +21,7 @@ import { DramaAssetsPanel } from "./drama-assets-panel";
 import { DramaStageHeader, stableTaskUrl } from "./drama-editor-elements";
 import { DramaGenerationPanel } from "./drama-generation-panel";
 import { DramaReviewPanel } from "./drama-review-panel";
+import { DramaAnalysisError } from "./drama-analysis-error";
 import { DramaStoryboardShotCard } from "./drama-storyboard-shot-card";
 import { DramaVersionModal } from "./drama-project-modals";
 import { dramaGenerationSize, estimateTaskPoints, referenceImage, shotReferenceImages, storyboardReferenceImages } from "./drama-shot-generation-utils";
@@ -55,7 +56,7 @@ export default function DramaProjectPage() {
                 </Empty>
             </main>
         );
-    return <DramaProjectEditor project={project} />;
+    return <DramaProjectEditor key={project.id} project={project} />;
 }
 
 function DramaProjectEditor({ project }: { project: DramaProject }) {
@@ -77,8 +78,10 @@ function DramaProjectEditor({ project }: { project: DramaProject }) {
     const [episodeNavigatorOpen, setEpisodeNavigatorOpen] = useState(false);
     const [agentOpen, setAgentOpen] = useState(false);
     const [selectedShotId, setSelectedShotId] = useState<string>();
-    const [analyzing, setAnalyzing] = useState(false);
-    const [designing, setDesigning] = useState(false);
+    const [pendingAnalysis, setPendingAnalysis] = useState<Record<string, boolean>>({});
+    const [analysisErrors, setAnalysisErrors] = useState<Record<string, string | undefined>>({});
+    const activeAnalysisRef = useRef(new Set<string>());
+    const activeEpisodeRef = useRef(project.activeEpisodeId);
     const [versionsOpen, setVersionsOpen] = useState(false);
     const [versions, setVersions] = useState<DramaProjectVersion[]>([]);
     const [versionsLoading, setVersionsLoading] = useState(false);
@@ -91,6 +94,25 @@ function DramaProjectEditor({ project }: { project: DramaProject }) {
     };
 
     const episode = project.episodes.find((item) => item.id === project.activeEpisodeId) || project.episodes[0];
+    const contentKey = `${episode.id}:content`;
+    const visualKey = `${episode.id}:visual`;
+    const analyzing = Boolean(pendingAnalysis[contentKey]);
+    const designing = Boolean(pendingAnalysis[visualKey]);
+    const clearAnalysisError = (key: string) => setAnalysisErrors((errors) => ({ ...errors, [key]: undefined }));
+    const startAnalysis = (key: string) => {
+        if (activeAnalysisRef.current.has(key)) return false;
+        activeAnalysisRef.current.add(key);
+        clearAnalysisError(key);
+        setPendingAnalysis((pending) => ({ ...pending, [key]: true }));
+        return true;
+    };
+    const finishAnalysis = (key: string) => {
+        activeAnalysisRef.current.delete(key);
+        setPendingAnalysis((pending) => ({ ...pending, [key]: false }));
+    };
+    useEffect(() => {
+        activeEpisodeRef.current = episode.id;
+    }, [episode.id]);
     useEffect(() => {
         const media = window.matchMedia("(min-width: 1366px)");
         const update = () => {
@@ -106,7 +128,7 @@ function DramaProjectEditor({ project }: { project: DramaProject }) {
     useDramaAudioQueue(project, episode, config, updateShot);
     const analyzeScript = async () => {
         if (!episode.script.trim()) return message.warning("请先填写剧本内容");
-        setAnalyzing(true);
+        if (!startAnalysis(contentKey)) return;
         try {
             const data = await requestDramaAnalysis<DramaContentAnalysis>({
                 requestId: `drama-content:${project.id}:${episode.id}:${nanoid()}`,
@@ -118,18 +140,20 @@ function DramaProjectEditor({ project }: { project: DramaProject }) {
             });
             await createVersion(project, "AI 内容解析前");
             applyContentAnalysis(project.id, episode.id, data);
-            setStage("review");
-            message.success(`已提取 ${data.characters.length} 个角色、${data.scenes.length} 个场景和 ${data.shots.length} 个待审核镜头`);
+            if (activeEpisodeRef.current === episode.id) {
+                setStage("review");
+                message.success(`已提取 ${data.characters.length} 个角色、${data.scenes.length} 个场景和 ${data.shots.length} 个待审核镜头`);
+            }
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "AI 剧本解析失败");
+            setAnalysisErrors((errors) => ({ ...errors, [contentKey]: error instanceof Error ? error.message : "AI 剧本解析失败" }));
         } finally {
-            setAnalyzing(false);
+            finishAnalysis(contentKey);
         }
     };
     const designVisuals = async () => {
         if (!episode.shots.length) return message.warning("请先完成内容解析");
+        if (!startAnalysis(visualKey)) return;
         updateEpisode(project.id, episode.id, { reviewStatus: "approved" });
-        setDesigning(true);
         try {
             const data = await requestDramaAnalysis<DramaVisualAnalysis>({
                 requestId: `drama-visual:${project.id}:${episode.id}:${nanoid()}`,
@@ -152,12 +176,14 @@ function DramaProjectEditor({ project }: { project: DramaProject }) {
             });
             await createVersion(project, "视觉方案生成前");
             applyVisualAnalysis(project.id, episode.id, data);
-            setStage("storyboard");
-            message.success("已按审核内容生成视觉方案");
+            if (activeEpisodeRef.current === episode.id) {
+                setStage("storyboard");
+                message.success("已按审核内容生成视觉方案");
+            }
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "AI 视觉方案生成失败");
+            setAnalysisErrors((errors) => ({ ...errors, [visualKey]: error instanceof Error ? error.message : "AI 视觉方案生成失败" }));
         } finally {
-            setDesigning(false);
+            finishAnalysis(visualKey);
         }
     };
     const openVersions = async () => {
@@ -393,6 +419,8 @@ function DramaProjectEditor({ project }: { project: DramaProject }) {
             <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden" data-drama-workspace-body>
                 <DramaEpisodeSidebar project={project} episode={episode} open={episodeNavigatorOpen && !assetsOpen} onOpenChange={setEpisodeNavigatorOpen} onStageChange={changeStage} />
                 <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" data-drama-production-surface>
+                    {analysisErrors[contentKey] ? <DramaAnalysisError phase="content" error={analysisErrors[contentKey]} onDismiss={() => clearAnalysisError(contentKey)} /> : null}
+                    {analysisErrors[visualKey] ? <DramaAnalysisError phase="visual" error={analysisErrors[visualKey]} onDismiss={() => clearAnalysisError(visualKey)} /> : null}
                     <div className="min-h-0 min-w-0 flex-1 overflow-y-auto" data-drama-production-scroll>
                         <section
                             className={`mx-auto flex min-h-full min-w-0 flex-col px-3 py-3 ${stage === "script" ? "max-w-none min-[1366px]:px-3 min-[1366px]:pb-3 min-[1366px]:pt-3" : "max-w-[1440px] sm:px-5 sm:py-4"}`}

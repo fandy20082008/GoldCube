@@ -17,6 +17,36 @@ describe("text planning runtime protocol matrix", () => {
         vi.useRealTimers();
     });
 
+    it.each([
+        [new DOMException("deadline", "TimeoutError"), 504],
+        [new TypeError("fetch failed"), 502],
+    ])("does not retry a request interrupted before response headers (%s)", async (error, status) => {
+        const onInvalidResponse = vi.fn();
+        mockedFetch.mockRejectedValue(error);
+
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true, onInvalidResponse })).rejects.toMatchObject({ status, retryable: false, reason: "transport" });
+        expect(mockedFetch).toHaveBeenCalledOnce();
+        // The proxy owns refunds before billing headers have reached this caller.
+        expect(onInvalidResponse).not.toHaveBeenCalled();
+    });
+
+    it("classifies an interrupted HTTP error body without trying another request", async () => {
+        const onInvalidResponse = vi.fn();
+        const response = new Response(
+            new ReadableStream({
+                pull(controller) {
+                    controller.error(new DOMException("deadline", "TimeoutError"));
+                },
+            }),
+            { status: 502, headers: { "content-type": "application/json" } },
+        );
+        mockedFetch.mockResolvedValue(response);
+
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true, onInvalidResponse })).rejects.toMatchObject({ status: 504, retryable: false, reason: "transport" });
+        expect(mockedFetch).toHaveBeenCalledOnce();
+        expect(onInvalidResponse).toHaveBeenCalledExactlyOnceWith(response.headers);
+    });
+
     it.each([true, false])("refunds an interrupted response body once without retrying (stream=%s)", async (stream) => {
         const onInvalidResponse = vi.fn();
         const response = new Response(
@@ -416,7 +446,7 @@ describe("text planning runtime protocol matrix", () => {
         const failed = candidate("newapi", { id: "failed" });
         const healthy = candidate("newapi", { id: "healthy" });
         mockedFetch.mockRejectedValueOnce(new Error("connection refused"));
-        await expect(requestStructuredText(requestInput(failed))).rejects.toThrow("暂时无法连接");
+        await expect(requestStructuredText(requestInput(failed))).rejects.toThrow("连接中断");
         mockedFetch.mockResolvedValueOnce(chatJsonResponse());
         await requestStructuredText(requestInput(healthy));
 
@@ -430,10 +460,10 @@ describe("text planning runtime protocol matrix", () => {
         await expect(requestStructuredText(requestInput(candidate("newapi")))).rejects.toThrow("文本模型渠道暂不可用（HTTP 502）");
     });
 
-    it("把超时转换为可读且可切换渠道的错误", async () => {
+    it("把超时转换为可读且不会自动重发的错误", async () => {
         mockedFetch.mockRejectedValue(Object.assign(new Error("timed out"), { name: "TimeoutError" }));
 
-        await expect(requestStructuredText(requestInput(candidate("newapi")))).rejects.toThrow("文本模型规划响应超时");
+        await expect(requestStructuredText(requestInput(candidate("newapi")))).rejects.toMatchObject({ message: expect.stringContaining("超过请求超时设置"), status: 504, retryable: false });
     });
 
     it("文本规划采用默认超时并遵循管理员候选配置", async () => {

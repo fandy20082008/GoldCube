@@ -199,6 +199,30 @@ describe("OpenAI Responses proxy", () => {
         const upstreamBody = fetchMock.mock.calls[0]?.[1]?.body;
         expect(JSON.parse(new TextDecoder().decode(upstreamBody as ArrayBuffer))).toMatchObject({ model: "gpt-5", input: [{ role: "user", content: "hello" }] });
     });
+
+    it.each([0, 2])("refunds an interrupted text request once before headers, including free quota (cost=%s)", async (cost) => {
+        const abort = new AbortController();
+        mocks.consumeUserPoints.mockResolvedValue({ model: "writer", cost, units: 1, usageKind: "text", recordId: "text-before-headers", remaining: 4, permanentRemaining: 4, dailyRemaining: 0, dailyExpiresAt: "" });
+        mocks.refundUserPoints.mockResolvedValue({ pointsBalance: 4 + cost });
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+            abort.abort();
+            throw new DOMException("cancelled", "AbortError");
+        });
+        const response = await POST(
+            new Request("http://localhost/api/ai/system/channel-one/v1/responses", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ model: "gpt-5", input: "synthetic input" }),
+                signal: abort.signal,
+            }),
+            { params: Promise.resolve({ channelId: "channel-one", path: ["v1", "responses"] }) },
+        );
+
+        expect(response.status).toBe(502);
+        expect(response.headers.get("x-vozeb-pro-points-remaining")).toBe(String(4 + cost));
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(mocks.refundUserPoints).toHaveBeenCalledExactlyOnceWith("user-one", "writer", cost, "text", 1, undefined, "text-before-headers");
+    });
 });
 
 describe("GlobalAiOpc native text proxy", () => {
