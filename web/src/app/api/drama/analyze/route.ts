@@ -130,6 +130,7 @@ async function analyzeRequest(request: Request, signal = request.signal) {
             return response;
         }
         const result = await analyzeDramaContentCandidate({
+            analysisId,
             origin: resolveInternalOrigin(new URL(request.url).origin),
             cookie: request.headers.get("cookie") || "",
             candidate,
@@ -222,6 +223,7 @@ type DramaContentCall = Awaited<ReturnType<typeof requestFunctionCall>>;
 type DramaTool = { name: string; description: string; parameters: Record<string, unknown> };
 
 async function analyzeDramaContentCandidate(input: {
+    analysisId: string;
     origin: string;
     cookie: string;
     candidate: TextPlanningCandidate;
@@ -252,6 +254,8 @@ async function analyzeDramaContentCandidate(input: {
 }
 
 async function analyzeDramaScriptSegment(input: Parameters<typeof analyzeDramaContentCandidate>[0], script: string, segmentKey: string, calls: DramaContentCall[]): Promise<ReturnType<typeof normalizeDramaContentAnalysis>> {
+    if (input.signal.aborted) throw input.signal.reason || new Error("剧本整理已取消");
+    const startedAt = Date.now();
     try {
         const call = await requestFunctionCall(
             input.origin,
@@ -273,17 +277,32 @@ async function analyzeDramaScriptSegment(input: Parameters<typeof analyzeDramaCo
             const data = normalizeDramaContentAnalysis(parsed, input.durationPolicy, script);
             if (!hasCompleteDramaContentAnalysis(data, script)) throw new Error("模型返回的剧本对白或原文不完整");
             calls.push(call);
+            console.info("[drama-analyze-segment]", JSON.stringify({ analysisId: input.analysisId, segmentKey, scriptLength: script.length, elapsedMs: Date.now() - startedAt, outcome: "succeeded" }));
             return data;
         } catch (error) {
             if (hasSystemAiCharge(call)) input.onRefund((await refund(input.userId, input.model, call))?.pointsBalance);
             throw error;
         }
     } catch (error) {
+        console.info(
+            "[drama-analyze-segment]",
+            JSON.stringify({
+                analysisId: input.analysisId,
+                segmentKey,
+                scriptLength: script.length,
+                elapsedMs: Date.now() - startedAt,
+                outcome: input.signal.aborted ? "cancelled" : isAdaptiveContentError(error) ? "invalid-content" : "upstream-failure",
+            }),
+        );
+        if (input.signal.aborted) throw error;
         const split = splitDramaScriptAtBoundary(script);
         if (!split || !isAdaptiveContentError(error)) throw error;
-        const left = await analyzeDramaScriptSegment(input, split[0], `${segmentKey}.0`, calls);
-        const right = await analyzeDramaScriptSegment(input, split[1], `${segmentKey}.1`, calls);
-        return mergeDramaContentAnalyses([left, right]);
+        const [left, right] = await Promise.allSettled([analyzeDramaScriptSegment(input, split[0], `${segmentKey}.0`, calls), analyzeDramaScriptSegment(input, split[1], `${segmentKey}.1`, calls)]);
+        // The outer handler refunds completed siblings. Both requests must
+        // settle before it can release their charges and return the failure.
+        if (left.status === "rejected") throw left.reason;
+        if (right.status === "rejected") throw right.reason;
+        return mergeDramaContentAnalyses([left.value, right.value]);
     }
 }
 
@@ -294,14 +313,18 @@ function isAdaptiveContentError(error: unknown) {
 }
 
 function hasCompleteDramaSourceCoverage(value: unknown, sourceScript: string) {
-    const source = sourceScript.trim().replace(/\s/gu, "");
+    // The model may alter punctuation or quote marks. Confirm that its raw
+    // fragments still contain every non-punctuation character in order before
+    // normalization restores the exact source text. Checking only the restored
+    // result would silently accept genuinely omitted or reordered passages.
+    const source = sourceScript.trim().replace(/[\s\p{P}]/gu, "");
     const output = value && typeof value === "object" && !Array.isArray(value) ? value : {};
     const shots = "shots" in output && Array.isArray(output.shots) ? output.shots : [];
     const covered = shots
         .map((shot) => (shot && typeof shot === "object" && !Array.isArray(shot) && "sourceText" in shot && typeof shot.sourceText === "string" ? shot.sourceText : ""))
         .join("")
-        .replace(/\s/gu, "");
-    return Boolean(source && covered === source);
+        .replace(/[\s\p{P}]/gu, "");
+    return Boolean(shots.length && source && covered === source);
 }
 
 function readCallResult(args: string, headers: Headers) {

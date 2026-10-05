@@ -321,6 +321,102 @@ describe("POST /api/drama/analyze", () => {
         await expect(response.json()).resolves.toMatchObject({ code: 0, data: { shots: [expect.objectContaining({ title: "荒原" })] } });
     });
 
+    it("restores original punctuation and quote-independent shot boundaries without another model call", async () => {
+        const script = "风起了，雨停了。\n灯熄灭！";
+        const logs = vi.spyOn(console, "info").mockImplementation(() => {});
+        mocks.requestStructuredText.mockResolvedValueOnce({
+            arguments: JSON.stringify({
+                episode: { outline: "夜晚", hook: "", nextPreview: "", sourceRange: "第一场" },
+                characters: [],
+                scenes: [],
+                props: [],
+                clues: [],
+                shots: ["风起了,雨停了!", "灯熄灭。"].map((sourceText) => ({
+                    title: "夜晚",
+                    description: sourceText,
+                    sourceText,
+                    shotBoundary: "场景变化",
+                    dialogue: "",
+                    narration: "",
+                    utterances: [],
+                    duration: 5,
+                    characterNames: [],
+                    sceneName: "",
+                    propNames: [],
+                    clueNames: [],
+                })),
+            }),
+            headers: new Headers(),
+            protocol: "chat",
+            elapsedMs: 10,
+        });
+        const response = await POST(
+            new Request("http://localhost/api/drama/analyze", {
+                method: "POST",
+                headers: { "content-type": "application/json", cookie: "session=test" },
+                body: JSON.stringify({ requestId: "drama-punctuation-recovery", phase: "content", script }),
+            }),
+        );
+        const payload = (await response.json()) as { code: number; data: { shots: Array<{ sourceText: string }> } };
+        expect(payload.code).toBe(0);
+        expect(
+            payload.data.shots
+                .map((shot) => shot.sourceText)
+                .join("")
+                .replace(/\s/gu, ""),
+        ).toBe(script.replace(/\s/gu, ""));
+        expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
+        expect(logs.mock.calls.some(([tag, data]) => tag === "[drama-analyze-segment]" && JSON.parse(String(data)).outcome === "succeeded")).toBe(true);
+        expect(JSON.stringify(logs.mock.calls)).not.toContain(script);
+        logs.mockRestore();
+    });
+
+    it.each([
+        ["omitted passage", "风起了，雨停了"],
+        ["duplicate passage", "风起了，风起了，雨停了，灯熄灭了"],
+        ["reordered passage", "灯熄灭了，雨停了，风起了"],
+    ])("rejects %s instead of filling it from the input script", async (_, sourceText) => {
+        const script = "风起了，雨停了，灯熄灭了";
+        mocks.requestStructuredText.mockResolvedValueOnce({
+            arguments: JSON.stringify({
+                episode: { outline: "夜晚", hook: "", nextPreview: "", sourceRange: "第一场" },
+                characters: [],
+                scenes: [],
+                props: [],
+                clues: [],
+                shots: [
+                    {
+                        title: "夜晚",
+                        description: sourceText,
+                        sourceText,
+                        shotBoundary: "场景变化",
+                        dialogue: "",
+                        narration: "",
+                        utterances: [],
+                        duration: 5,
+                        characterNames: [],
+                        sceneName: "",
+                        propNames: [],
+                        clueNames: [],
+                    },
+                ],
+            }),
+            headers: new Headers(),
+            protocol: "chat",
+            elapsedMs: 10,
+        });
+        const response = await POST(
+            new Request("http://localhost/api/drama/analyze", {
+                method: "POST",
+                headers: { "content-type": "application/json", cookie: "session=test" },
+                body: JSON.stringify({ requestId: "drama-reject-missing-source", phase: "content", script }),
+            }),
+        );
+        expect(response.status).toBe(502);
+        await expect(response.json()).resolves.toMatchObject({ code: 502, msg: "模型返回的剧本原文不完整" });
+        expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
+    });
+
     it("normalizes missing model utterances from the original novel instead of rejecting the request", async () => {
         const script = "顾言推开城门说：“先离开这里。”\n风雪压过城门。";
         mocks.requestStructuredText.mockResolvedValueOnce({
@@ -527,6 +623,65 @@ describe("POST /api/drama/analyze", () => {
         expect(response.status).toBe(502);
         expect(mocks.refundUserPoints).toHaveBeenCalledTimes(2);
         expect(mocks.refundUserPoints.mock.calls.map((call) => call[6])).toEqual(expect.arrayContaining(["points-failed-segment", "points-segment"]));
+    });
+
+    it("waits for both parallel segments before refunding a successful sibling", async () => {
+        const script = "风起了。\n雨停了。";
+        let completeRight!: (value: { arguments: string; headers: Headers; protocol: string; elapsedMs: number }) => void;
+        const pendingRight = new Promise<{ arguments: string; headers: Headers; protocol: string; elapsedMs: number }>((resolve) => {
+            completeRight = resolve;
+        });
+        const result = (sourceText: string, pointsRecordId?: string) => ({
+            arguments: JSON.stringify({
+                episode: { outline: "天气", hook: "", nextPreview: "", sourceRange: "第一场" },
+                characters: [],
+                scenes: [],
+                props: [],
+                clues: [],
+                shots: [{ title: "天气", description: sourceText, sourceText, shotBoundary: "天气变化", dialogue: "", narration: "", utterances: [], duration: 5, characterNames: [], sceneName: "", propNames: [], clueNames: [] }],
+            }),
+            headers: new Headers(pointsRecordId ? { "x-vozeb-pro-points-cost": "1", "x-vozeb-pro-points-record-id": pointsRecordId } : undefined),
+            protocol: "chat",
+            elapsedMs: 10,
+        });
+        mocks.requestStructuredText.mockImplementation(async (input) => {
+            const messages = (input as { messages: Array<{ content: string }> }).messages;
+            const requested = (JSON.parse(messages.at(-1)!.content) as { script: string }).script;
+            if (requested === script) return result("风起了");
+            if (requested === "风起了。") return result("别的文字", "failed-left");
+            return pendingRight;
+        });
+        const request = POST(
+            new Request("http://localhost/api/drama/analyze", {
+                method: "POST",
+                headers: { "content-type": "application/json", cookie: "session=test" },
+                body: JSON.stringify({ requestId: "drama-parallel-refund", phase: "content", script }),
+            }),
+        );
+        await vi.waitFor(() => expect(mocks.requestStructuredText).toHaveBeenCalledTimes(3));
+        await vi.waitFor(() => expect(mocks.refundUserPoints).toHaveBeenCalledWith("user-one", "planner", 1, "text", 1, undefined, "failed-left"));
+        expect(mocks.refundUserPoints.mock.calls.some((call) => call[6] === "successful-right")).toBe(false);
+        completeRight(result("雨停了。", "successful-right"));
+        await expect(request).resolves.toMatchObject({ status: 502 });
+        expect(mocks.refundUserPoints.mock.calls.map((call) => call[6])).toEqual(["failed-left", "successful-right"]);
+    });
+
+    it("does not create another segment request after cancellation", async () => {
+        const controller = new AbortController();
+        mocks.requestStructuredText.mockImplementation(async () => {
+            controller.abort();
+            throw new Error("模型返回的剧本原文不完整");
+        });
+        const response = await POST(
+            new Request("http://localhost/api/drama/analyze", {
+                method: "POST",
+                headers: { "content-type": "application/json", cookie: "session=test" },
+                body: JSON.stringify({ requestId: "drama-cancel-no-split", phase: "content", script: "风起了。\n雨停了。" }),
+                signal: controller.signal,
+            }),
+        );
+        expect(response.status).toBe(502);
+        expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
     });
 
     it("keeps one request idempotent while separate user actions use different billing keys", async () => {

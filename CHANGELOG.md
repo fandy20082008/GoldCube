@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.0.7-custom.15
+
+- Allow harmless punctuation, quote and whitespace differences in drama source fragments while rejecting lost, repeated or reordered content.
+- Run adaptive left and right segmentation concurrently, await both before refunds, and log only content-free analysis timing and outcome metadata.
+
 ## v0.0.7-custom.14
 
 - Preserve streamed text whitespace and prevent nested JSON from replacing an incomplete root.
