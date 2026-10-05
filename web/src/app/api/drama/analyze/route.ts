@@ -323,6 +323,7 @@ function describeArgumentsText(value: string) {
 }
 
 async function refund(userId: string, model: string, source: Headers | SystemAiBilling) {
-    const billing = source instanceof Headers ? readSystemAiBilling(source) : source;
+    // Internal fetch uses undici.Headers, which is not a native Headers instance.
+    const billing = "get" in source && typeof source.get === "function" ? readSystemAiBilling(source) : (source as SystemAiBilling);
     return hasSystemAiCharge(billing) ? refundUserPoints(userId, model, billing.pointsCost, "text", 1, undefined, billing.pointsRecordId) : null;
 }

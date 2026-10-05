@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Headers as UndiciHeaders } from "undici";
 
 const mocks = vi.hoisted(() => ({
     getCurrentUser: vi.fn(),
@@ -197,6 +198,32 @@ describe("POST /api/drama/analyze", () => {
         await expect(response.json()).resolves.toMatchObject({ code: 502, pointsRemaining: 0 });
         expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
         expect(mocks.refundUserPoints).toHaveBeenCalledExactlyOnceWith("user-one", "planner", 0, "text", 1, undefined, "free-interrupted-call");
+    });
+
+    it.each([
+        ["content", 0],
+        ["content", 1],
+        ["visual", 0],
+        ["visual", 1],
+    ])("refunds interrupted %s cost=%s using real undici response headers", async (phase, cost) => {
+        const headers = new UndiciHeaders({ "x-vozeb-pro-points-cost": String(cost), "x-vozeb-pro-points-record-id": `undici-${phase}-${cost}` });
+        expect(headers).not.toBeInstanceOf(Headers);
+        mocks.refundUserPoints.mockResolvedValue({ pointsBalance: cost });
+        mocks.requestStructuredText.mockImplementation(async (input) => {
+            await input.onInvalidResponse(headers);
+            throw Object.assign(new Error("body timeout"), { status: 504, retryable: false, reason: "transport" });
+        });
+        const response = await POST(
+            new Request("http://localhost/api/drama/analyze", {
+                method: "POST",
+                headers: { "content-type": "application/json", "x-vozeb-stream-response": "1" },
+                body: JSON.stringify({ requestId: `undici-refund-${phase}-${cost}`, phase, script: "原文。", shots: [{ id: "shot-one", sourceText: "原文。" }] }),
+            }),
+        );
+
+        await expect(response.json()).resolves.toMatchObject({ code: 502, pointsRemaining: cost });
+        expect(mocks.requestStructuredText).toHaveBeenCalledOnce();
+        expect(mocks.refundUserPoints).toHaveBeenCalledExactlyOnceWith("user-one", "planner", cost, "text", 1, undefined, `undici-${phase}-${cost}`);
     });
 
     it("keeps authentication failures in the streamed business envelope without calling a model", async () => {
