@@ -502,6 +502,80 @@ describe("text planning runtime protocol matrix", () => {
         await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true })).resolves.toMatchObject({ arguments: '{"result":"chunked"}' });
     });
 
+    it.each([false, true])("preserves whitespace inside Chat delta content (parts=%s)", async (parts) => {
+        const deltas = ['{"result":"Hello', " ", 'world"}'].map((text) => ({ choices: [{ delta: { content: parts ? [{ type: "text", text }] : text } }] }));
+        mockedFetch.mockResolvedValue(new Response(deltas.map((delta) => `data: ${JSON.stringify(delta)}\n\n`).join("") + "data: [DONE]\n\n"));
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true, allowRepair: false })).resolves.toMatchObject({ arguments: '{"result":"Hello world"}' });
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("logs only safe argument shape and stream completion metadata on rejected output", async () => {
+        const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+            const payload = { privateCustomerField: "private customer text", episode: { outline: "private outline" } };
+            mockedFetch.mockResolvedValue(new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(payload) } }] })}\n\n` + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
+            const onInvalidResponse = vi.fn();
+            await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true, allowRepair: false, validateArguments: () => false, onInvalidResponse })).rejects.toMatchObject({ failureCode: "invalid-structured-result" });
+            expect(mockedFetch).toHaveBeenCalledTimes(1);
+            expect(onInvalidResponse).toHaveBeenCalledTimes(1);
+            const logged = String(errorLog.mock.calls[0]?.[1]);
+            expect(JSON.parse(logged)).toMatchObject({
+                argumentShape: { rootType: "object", episodeType: "object", shotsType: "undefined", shotCount: 0 },
+                stream: { doneMarker: true, responseCompleted: false, finishReason: "stop" },
+            });
+            expect(logged).not.toContain("private");
+        } finally {
+            errorLog.mockRestore();
+        }
+    });
+
+    it.each(["length", "content_filter", null])("rejects truncated outer JSON without repair or another request (finish=%s)", async (finish) => {
+        const content = '{"episode":{"outline":"fixture"},"shots":[{"sourceText":"half';
+        const terminal = finish ? `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finish }] })}\n\ndata: [DONE]\n\n` : "";
+        mockedFetch.mockResolvedValue(new Response(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n${terminal}`));
+        const onInvalidResponse = vi.fn();
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true, allowRepair: true, onInvalidResponse })).rejects.toMatchObject({ reason: "incomplete-output", retryable: false });
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        expect(onInvalidResponse).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["response.incomplete", "response.failed"])("rejects %s even when the preceding JSON is complete", async (type) => {
+        mockedFetch.mockResolvedValue(new Response(`data: ${JSON.stringify({ type: "response.output_text.delta", delta: '{"result":"partial"}' })}\n\ndata: ${JSON.stringify({ type })}\n\n`));
+        const onInvalidResponse = vi.fn();
+        await expect(requestStructuredText({ ...requestInput(candidate("compatible", { createPath: "/responses" })), stream: true, allowRepair: true, onInvalidResponse })).rejects.toMatchObject({ reason: "incomplete-output", retryable: false });
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        expect(onInvalidResponse).toHaveBeenCalledTimes(1);
+    });
+
+    it("accepts a complete root with a repairable trailing comma and normal stop", async () => {
+        mockedFetch.mockResolvedValue(new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"result":"ok",}' }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`));
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true })).resolves.toMatchObject({ arguments: '{"result":"ok"}' });
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps an unmatched brace in permitted natural-language output with normal stop", async () => {
+        const content = "The opening brace is {";
+        mockedFetch.mockResolvedValue(new Response(`data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`));
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream: true, allowNaturalLanguage: true })).resolves.toMatchObject({ arguments: content });
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([true, false])("rejects a complete HTTP envelope reporting length without retry (requestedStream=%s)", async (stream) => {
+        mockedFetch.mockResolvedValue(Response.json({ choices: [{ message: { content: '{"episode":{"outline":"fixture"},"shots":[{"sourceText":"half' }, finish_reason: "length" }] }));
+        const onInvalidResponse = vi.fn();
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), stream, allowRepair: true, onInvalidResponse })).rejects.toMatchObject({ reason: "incomplete-output", retryable: false });
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        expect(onInvalidResponse).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["incomplete", "failed"])("rejects a Responses HTTP envelope with status %s", async (status) => {
+        mockedFetch.mockResolvedValue(Response.json({ status, output_text: '{"result":"partial"}' }));
+        const onInvalidResponse = vi.fn();
+        await expect(requestStructuredText({ ...requestInput(candidate("compatible", { createPath: "/responses" })), stream: true, allowRepair: true, onInvalidResponse })).rejects.toMatchObject({ reason: "incomplete-output", retryable: false });
+        expect(mockedFetch).toHaveBeenCalledTimes(1);
+        expect(onInvalidResponse).toHaveBeenCalledTimes(1);
+    });
+
     it("增量解析 Responses 事件流和 Gemini NDJSON", async () => {
         mockedFetch
             .mockResolvedValueOnce(new Response('data: {"type":"response.output_text.delta","delta":"{\\"result\\":\\"responses\\"}"}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } }))

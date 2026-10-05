@@ -3,7 +3,7 @@ import { recordChannelRuntimeFailure, recordChannelRuntimeSuccess } from "@/lib/
 import { fetchInternalApi } from "@/lib/server/internal-origin";
 import { resolveModelRequestTimeoutMs } from "@/lib/server/model-request-policy";
 import { buildProviderRequest, isProviderBusinessError, readProviderError, readProviderString, readProviderValue } from "@/lib/server/provider-task-config";
-import { extractJsonObjectText } from "@/lib/server/structured-model-output";
+import { extractJsonObjectText, hasIncompleteJsonObject } from "@/lib/server/structured-model-output";
 import { SYSTEM_AI_LOGICAL_MODEL_HEADER, SYSTEM_AI_POINTS_IDEMPOTENCY_HEADER, SYSTEM_AI_UPSTREAM_MODEL_HEADER, systemAiBillingHeaders } from "@/lib/server/system-ai-billing";
 import { interpolateModelPath, resolveTextProtocol } from "@/lib/server/text-protocol-resolver";
 import { resolveChannelModelConfig } from "@/lib/channel-protocol-registry";
@@ -17,7 +17,7 @@ export type TextPlanningCandidate = {
 };
 export type TextPlanningTool = { name: string; description: string; parameters: Record<string, unknown> };
 export type TextPlanningCall = { arguments: string; headers: Headers; protocol: TextPlanningProtocol; elapsedMs: number; transport?: "stream" | "complete"; fallbackReason?: string };
-type TextPlanningRequestErrorReason = "http" | "transport" | "invalid-structure";
+type TextPlanningRequestErrorReason = "http" | "transport" | "invalid-structure" | "incomplete-output";
 export type StructuredTextFailureCode = "invalid-response-json" | "missing-structured-result" | "invalid-structured-result";
 
 type RuntimeState = {
@@ -298,6 +298,12 @@ async function readStructuredResponse(input: StructuredTextRequest, request: Pro
     }
     const raw = typeof body === "string" ? body : body.raw;
     if (!response.ok) throw new TextPlanningRequestError(safeUpstreamError(raw, response.status), response.status, retryableStatus(response.status));
+    const streamState = streamed?.diagnostics();
+    if (streamState && (streamState.incompleteJson || streamState.responseIncomplete || ["length", "content_filter"].includes(streamState.finishReason || ""))) {
+        await input.onInvalidResponse?.(response.headers);
+        console.error("[text-planning] incomplete streamed output", JSON.stringify({ protocol: request.protocol, stream: streamState }));
+        throw new TextPlanningRequestError(streamState.finishReason === "content_filter" ? "文本模型输出被上游限制，未收到完整结果，请检查模型渠道后重试" : "文本模型输出未完成，未收到完整结果，请检查模型渠道后重试", 502, false, "incomplete-output");
+    }
     let payload: Record<string, unknown> | null = null;
     try {
         const parsed = JSON.parse(raw.replace(/^\uFEFF/u, "").trim());
@@ -305,7 +311,7 @@ async function readStructuredResponse(input: StructuredTextRequest, request: Pro
     } catch {
         if (request.stream) {
             const streamedArguments = (typeof body === "string" ? undefined : body.arguments) || extractStreamedArguments(raw, request.protocol, input.tool.name, request.resultField, input.allowNaturalLanguage);
-            if (streamedArguments) return finalizeStructuredArguments(input, request, response, startedAt, streamedArguments);
+            if (streamedArguments) return finalizeStructuredArguments(input, request, response, startedAt, streamedArguments, {}, streamed?.diagnostics());
         }
         await input.onInvalidResponse?.(response.headers);
         console.error("[text-planning] structured response is not JSON", JSON.stringify({ protocol: request.protocol, status: response.status, responseBytes: Buffer.byteLength(raw, "utf8") }));
@@ -316,6 +322,15 @@ async function readStructuredResponse(input: StructuredTextRequest, request: Pro
         console.error("[text-planning] structured response has invalid top-level value", JSON.stringify({ protocol: request.protocol, status: response.status, responseBytes: Buffer.byteLength(raw, "utf8") }));
         throw new TextPlanningRequestError(`文本模型返回的顶层数据无效（协议：${request.protocol}）`, 502, false, "invalid-structure", "invalid-response-json");
     }
+    // Compatible providers may ignore stream:true and return a complete HTTP
+    // envelope containing an explicitly incomplete model output.
+    const finishReason = firstRecord(payload.choices)?.finish_reason;
+    const responseIncomplete = payload.status === "incomplete" || payload.status === "failed" || payload.type === "response.incomplete" || payload.type === "response.failed";
+    if (finishReason === "length" || finishReason === "content_filter" || responseIncomplete) {
+        await input.onInvalidResponse?.(response.headers);
+        console.error("[text-planning] incomplete output", JSON.stringify({ protocol: request.protocol, finishReason: finishReason === "length" || finishReason === "content_filter" ? finishReason : null, responseIncomplete }));
+        throw new TextPlanningRequestError(finishReason === "content_filter" ? "文本模型输出被上游限制，未收到完整结果，请检查模型渠道后重试" : "文本模型输出未完成，未收到完整结果，请检查模型渠道后重试", 502, false, "incomplete-output");
+    }
     if (request.protocol === "custom" && isProviderBusinessError(payload)) {
         await input.onInvalidResponse?.(response.headers);
         throw new TextPlanningRequestError(readProviderError(payload) || "自定义文本协议返回失败");
@@ -324,7 +339,7 @@ async function readStructuredResponse(input: StructuredTextRequest, request: Pro
     return finalizeStructuredArguments(input, request, response, startedAt, argumentsText, payload);
 }
 
-async function finalizeStructuredArguments(input: StructuredTextRequest, request: ProtocolRequest, response: Response, startedAt: number, argumentsText: string, payload: Record<string, unknown> = {}) {
+async function finalizeStructuredArguments(input: StructuredTextRequest, request: ProtocolRequest, response: Response, startedAt: number, argumentsText: string, payload: Record<string, unknown> = {}, streamDiagnostics?: StreamDiagnostics) {
     if (!argumentsText) {
         await input.onInvalidResponse?.(response.headers);
         console.error("[text-planning] structured response has no readable result", JSON.stringify({ protocol: request.protocol, tool: input.tool.name, ...describeStructuredPayload(payload) }));
@@ -332,7 +347,10 @@ async function finalizeStructuredArguments(input: StructuredTextRequest, request
     }
     if (!validArguments(input, argumentsText)) {
         await input.onInvalidResponse?.(response.headers);
-        console.error("[text-planning] structured response failed argument validation", JSON.stringify({ protocol: request.protocol, tool: input.tool.name, ...describeStructuredPayload(payload) }));
+        console.error(
+            "[text-planning] structured response failed argument validation",
+            JSON.stringify({ protocol: request.protocol, tool: input.tool.name, ...describeStructuredPayload(payload), argumentShape: describeArgumentShape(argumentsText), ...(streamDiagnostics ? { stream: streamDiagnostics } : {}) }),
+        );
         throw new TextPlanningRequestError(`文本模型返回了 JSON，但字段不符合 ${input.tool.name} 要求`, 502, false, "invalid-structure", "invalid-structured-result");
     }
     const elapsedMs = Date.now() - startedAt;
@@ -380,15 +398,21 @@ function extractStreamedArguments(raw: string, protocol: TextPlanningProtocol, t
     return accumulator.result();
 }
 
-type StreamAccumulator = { append: (line: string) => void; result: () => string };
+type StreamDiagnostics = { doneMarker: boolean; responseCompleted: boolean; responseIncomplete: boolean; incompleteJson: boolean; finishReason: string | null };
+type StreamAccumulator = { append: (line: string) => void; result: () => string; diagnostics: () => StreamDiagnostics };
 
 function createStreamAccumulator(protocol: TextPlanningProtocol, toolName: string, resultField?: string, allowNaturalLanguage = false): StreamAccumulator {
     let content = "";
     let argumentsText = "";
+    const diagnostics: StreamDiagnostics = { doneMarker: false, responseCompleted: false, responseIncomplete: false, incompleteJson: false, finishReason: null };
     return {
         append(line) {
             const value = line.trim().startsWith("data:") ? line.trim().slice(5).trim() : line.trim();
-            if (!value || value === "[DONE]") return;
+            if (value === "[DONE]") {
+                diagnostics.doneMarker = true;
+                return;
+            }
+            if (!value) return;
             let payload: Record<string, unknown>;
             try {
                 const parsed = JSON.parse(value) as unknown;
@@ -398,12 +422,16 @@ function createStreamAccumulator(protocol: TextPlanningProtocol, toolName: strin
                 return;
             }
             if (protocol === "chat") {
+                const reason = firstRecord(payload.choices)?.finish_reason;
+                if (typeof reason === "string") diagnostics.finishReason = ["stop", "length", "tool_calls", "function_call", "content_filter"].includes(reason) ? reason : "other";
                 const delta = record(firstRecord(payload.choices)?.delta) || record(firstRecord(payload.choices)?.message);
                 const call = records(delta?.tool_calls).find((item) => !toolName || record(item.function)?.name === toolName || !record(item.function)?.name);
                 argumentsText += typeof record(call?.function)?.arguments === "string" ? String(record(call?.function)?.arguments) : "";
-                content += textContent(delta?.content);
+                content += rawTextContent(delta?.content);
             } else if (protocol === "responses") {
                 const eventType = typeof payload.type === "string" ? payload.type : "";
+                if (eventType === "response.completed") diagnostics.responseCompleted = true;
+                if (eventType === "response.incomplete" || eventType === "response.failed") diagnostics.responseIncomplete = true;
                 if (eventType.endsWith(".delta") && typeof payload.delta === "string") {
                     if (eventType.includes("function_call") && eventType.includes("arguments")) argumentsText += payload.delta;
                     else content += payload.delta;
@@ -424,7 +452,12 @@ function createStreamAccumulator(protocol: TextPlanningProtocol, toolName: strin
             }
         },
         result() {
+            if (hasIncompleteJsonObject(argumentsText || (!allowNaturalLanguage ? content : ""))) return "";
+            if (allowNaturalLanguage && !argumentsText && hasIncompleteJsonObject(content)) return content.trim();
             return extractJsonObjectText(argumentsText) || extractJsonObjectText(content) || (allowNaturalLanguage ? content.trim() : "");
+        },
+        diagnostics() {
+            return { ...diagnostics, incompleteJson: hasIncompleteJsonObject(argumentsText || (!allowNaturalLanguage ? content : "")) };
         },
     };
 }
@@ -508,6 +541,23 @@ function describeStructuredPayload(payload: Record<string, unknown>) {
         candidates: records(payload.candidates).length,
         resultTypes: ["data", "result", "response", "output_text"].map((key) => `${key}:${valueType(payload[key])}`),
     };
+}
+
+function describeArgumentShape(argumentsText: string) {
+    try {
+        const value: unknown = JSON.parse(argumentsText);
+        const object = record(value);
+        // Only fixed contract field names and types/counts: no customer text,
+        // arbitrary property names, model content or channel secrets.
+        return {
+            rootType: valueType(value),
+            episodeType: valueType(object?.episode),
+            shotsType: valueType(object?.shots),
+            shotCount: Array.isArray(object?.shots) ? object.shots.length : 0,
+        };
+    } catch {
+        return { rootType: "invalid-json" };
+    }
 }
 
 function valueType(value: unknown) {
@@ -609,11 +659,14 @@ function jsonObjectArguments(value: unknown) {
 }
 
 function textContent(value: unknown) {
-    if (typeof value === "string") return value.trim();
+    return rawTextContent(value).trim();
+}
+
+function rawTextContent(value: unknown) {
+    if (typeof value === "string") return value;
     return records(value)
         .map((item) => (typeof item.text === "string" ? item.text : ""))
-        .join("")
-        .trim();
+        .join("");
 }
 
 function validArguments(input: StructuredTextRequest, argumentsText: string) {

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.0.7-custom.14
+
+- Preserve streamed text whitespace and prevent nested JSON from replacing an incomplete root.
+- Reject incomplete structured text output with clear failure feedback; retain refunds and explicit user retries.
+- Add content-free output-shape and completion diagnostics. Gateway and customer data remain unchanged.
+
 ## v0.0.7-custom.13
 
 - Keep drama analysis failures visible per episode and restore billing after interrupted text responses. The default text deadline is ten minutes; shorter configured deadlines still apply. Transport failures do not automatically switch channels and resubmit.

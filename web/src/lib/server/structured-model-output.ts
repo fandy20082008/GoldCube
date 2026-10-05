@@ -14,42 +14,43 @@ export function extractJsonObjectText(value: unknown) {
     if (strict) return strict;
     for (let start = 0; start < text.length; start += 1) {
         if (text[start] !== "{") continue;
-        let depth = 0;
-        let escaped = false;
-        let inString = false;
-        for (let index = start; index < text.length; index += 1) {
-            const character = text[index];
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-            if (character === "\\" && inString) {
-                escaped = true;
-                continue;
-            }
-            if (character === '"') {
-                inString = !inString;
-                continue;
-            }
-            if (inString) continue;
-            if (character === "{") depth += 1;
-            if (character !== "}") continue;
-            depth -= 1;
-            if (depth !== 0) continue;
-            const candidate = text.slice(start, index + 1);
-            const parsed = parseObjectText(candidate);
-            if (parsed) return parsed;
-            const repaired = repairObjectText(candidate);
-            if (repaired) return repaired;
-            break;
-        }
-    }
-    for (let start = 0; start < text.length; start += 1) {
-        if (text[start] !== "{") continue;
-        const repaired = repairObjectText(text.slice(start));
-        if (repaired) return repaired;
+        const end = jsonObjectEnd(text, start);
+        // A truncated outer object must never promote a complete nested object
+        // to the requested root. Repair only that outer candidate.
+        if (end === -1) return repairObjectText(text.slice(start));
+        const candidate = text.slice(start, end + 1);
+        const parsed = parseObjectText(candidate) || repairObjectText(candidate);
+        if (parsed) return parsed;
+        start = end;
     }
     return "";
+}
+
+export function hasIncompleteJsonObject(value: string) {
+    const start = value.indexOf("{");
+    return start !== -1 && jsonObjectEnd(value, start) === -1;
+}
+
+function jsonObjectEnd(text: string, start: number) {
+    let depth = 0;
+    let escaped = false;
+    let inString = false;
+    for (let index = start; index < text.length; index += 1) {
+        const character = text[index];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (character === "\\" && inString) {
+            escaped = true;
+            continue;
+        }
+        if (character === '"') inString = !inString;
+        if (inString) continue;
+        if (character === "{") depth += 1;
+        if (character === "}" && --depth === 0) return index;
+    }
+    return -1;
 }
 
 function parseObjectText(value: string) {
