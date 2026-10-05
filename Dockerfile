@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 FROM node:22-bookworm-slim AS web-build
 
 WORKDIR /app/web
@@ -41,7 +39,7 @@ ENV NODE_OPTIONS=--max-old-space-size=384
 ENV UV_THREADPOOL_SIZE=2
 
 RUN set -eux; \
-    printf 'deb http://mirrors.ustc.edu.cn/debian bookworm main\ndeb http://mirrors.ustc.edu.cn/debian bookworm-updates main\ndeb http://mirrors.ustc.edu.cn/debian-security bookworm-security main\n' > /etc/apt/sources.list; \
+    printf 'deb http://mirrors.aliyun.com/debian bookworm main\ndeb http://mirrors.aliyun.com/debian bookworm-updates main\ndeb http://mirrors.aliyun.com/debian-security bookworm-security main\n' > /etc/apt/sources.list; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg fonts-noto-cjk postgresql-client && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /app/web/scripts

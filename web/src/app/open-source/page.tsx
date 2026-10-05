@@ -24,6 +24,12 @@ export default async function OpenSourcePage() {
                         <h2 className="text-lg font-semibold">版本 {release.releaseTag}</h2>
                         <p className="break-all text-sm">最终清单 SHA-256：{release.manifestSha256}</p>
                         <p className="text-sm text-muted-foreground">以下信息由部署清单固定。清单校验不替代源码下载、重建及运行制品核验。</p>
+                        {release.docsDeployment === "not-deployed" && <p className="text-sm">文档站服务未部署；文档及构建材料仍包含在主应用完整源码中。</p>}
+                        {release.deliveryStatus?.libvips === "deferred" && (
+                            <p role="status" className="text-sm">
+                                libvips 对应源码与重链接交付材料仍待补齐。本页面展示当前版本绑定，不表示该项许可交付已完成。
+                            </p>
+                        )}
                     </section>
                     {release.sources.map((source, index) => {
                         return (
@@ -50,6 +56,7 @@ export default async function OpenSourcePage() {
                         {release.artifacts.map((artifact) => (
                             <p key={artifact.role} className="break-all text-sm">
                                 <strong>{artifact.role}</strong>：{artifact.digest}
+                                {"archiveSha256" in artifact && <span className="block">制品归档 SHA-256：{artifact.archiveSha256}</span>}
                             </p>
                         ))}
                     </section>

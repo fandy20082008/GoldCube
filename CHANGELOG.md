@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.0.7-custom.13
+
+- Keep drama analysis failures visible per episode and restore billing after interrupted text responses. The default text deadline is ten minutes; shorter configured deadlines still apply. Transport failures do not automatically switch channels and resubmit.
+- Activate the already-published removal of bundled aggregate prompt seeds, automatic synchronization and the dedicated cover proxy. Preserve existing records and user-created/imported prompts.
+- Activate the already-published removal of WASM face/expression and subject-segmentation assistance. Preserve manual canvas tools and ordinary generation.
+- Expose immutable corresponding sources for the actual application and Gateway deployment. Bind a locally built OCI artifact without claiming registry publication; the documentation service is not deployed.
+- Native libvips source/relinking delivery work remains deferred by the project owner for this release. This is an outstanding delivery item, not a completed compliance check.
+
+
 - Fix missing refunds after interrupted drama analysis when internal HTTP responses use Undici Headers; cover content and visual analysis at zero and nonzero cost. No new dependency or license change.
 
 - Short-drama analysis now retains failure details per episode and stage. Interrupted text requests avoid automatic resubmission, preserve refund identity, and emit sanitized analysis diagnostics.

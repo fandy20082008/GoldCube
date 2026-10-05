@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { projectPublicRelease } from "./open-source-release";
+import { projectPublicRelease, type RunningSourceBinding } from "./open-source-release";
 
 function fixture() {
     const app = { repository: "fandy20082008/GoldCube", commit: "a".repeat(40), sourceArchive: { url: `https://github.com/fandy20082008/GoldCube/archive/${"a".repeat(40)}.tar.gz`, sha256: "b".repeat(64) } };
@@ -45,7 +45,7 @@ function fixture() {
     };
 }
 const running = { appCommit: "a".repeat(40), gatewayCommit: "c".repeat(40), appImageDigest: `sha256:${"f".repeat(64)}`, gatewayArtifactDigest: `sha256:${"f".repeat(64)}` };
-function run(value: unknown, binding = running) {
+function run(value: unknown, binding: RunningSourceBinding = running) {
     const bytes = Buffer.from(JSON.stringify(value));
     return projectPublicRelease(bytes, createHash("sha256").update(bytes).digest("hex"), binding);
 }
@@ -97,5 +97,89 @@ describe("public source projection", () => {
         const value = fixture();
         value.artifacts.shell.sourceArchiveSha256 = "1".repeat(64);
         expect(() => run(value)).toThrow();
+    });
+});
+
+function localFixture() {
+    const record = fixture();
+    record.schemaVersion = 2;
+    delete record.artifacts.docs;
+    for (const [role, artifact] of Object.entries(record.artifacts)) {
+        Object.assign(
+            artifact,
+            ["app", "frontend", "worker"].includes(role)
+                ? { kind: "local-oci-archive", uri: "/private/images/custom13.oci.tar", archiveSha256: "1".repeat(64), imageConfigId: `sha256:${"2".repeat(64)}` }
+                : { kind: "file-archive", archiveSha256: "f".repeat(64) },
+        );
+    }
+    return { ...record, deploymentScope: { docs: "not-deployed" }, deliveryStatus: { libvips: "deferred" } };
+}
+const localRunning = { ...running, appImageConfigId: `sha256:${"2".repeat(64)}`, appImageArchiveSha256: "1".repeat(64) };
+describe("local OCI source projection", () => {
+    it("binds seven deployed roles and complete Docs source without inventing a Docs image", () => {
+        const result = run(localFixture(), localRunning);
+        expect(result.artifacts.map((artifact) => artifact.role)).toEqual(["app", "frontend", "worker", "proxy", "shell", "assets", "deployment"]);
+        expect(result.docsDeployment).toBe("not-deployed");
+        expect(result.deliveryStatus).toEqual({ libvips: "deferred" });
+        expect(result.artifacts[0]).toMatchObject({ digest: running.appImageDigest, archiveSha256: localRunning.appImageArchiveSha256, imageConfigId: localRunning.appImageConfigId });
+        expect(JSON.stringify(result)).not.toContain("/private");
+        expect(JSON.stringify(result)).not.toContain("deploymentApproval");
+        expect(JSON.stringify(result)).not.toContain("ghcr.io");
+    });
+    it("does not require registry target declarations for a local OCI archive", () => {
+        const value = localFixture();
+        expect(run({ ...value, imageTargets: undefined }, localRunning).artifacts).toHaveLength(7);
+    });
+    it("requires explicit undeployed Docs scope while retaining complete Docs source", () => {
+        const value = localFixture();
+        value.deploymentScope.docs = "deployed";
+        expect(() => run(value, localRunning)).toThrow("scope");
+        value.deploymentScope.docs = "not-deployed";
+        expect(() => run({ ...value, components: { ...value.components, docs: undefined } }, localRunning)).toThrow("Docs source");
+    });
+    it("rejects substituting an image config ID for the OCI manifest digest", () => {
+        const value = localFixture();
+        Object.assign(value.artifacts.app, { imageConfigId: value.artifacts.app.digest });
+        expect(() => run(value, localRunning)).toThrow("Local OCI");
+    });
+    it.each(["archiveSha256", "imageConfigId", "digest"])("requires the same app/frontend/worker %s", (field) => {
+        const value = localFixture();
+        Object.assign(value.artifacts.worker, { [field]: field === "archiveSha256" ? "3".repeat(64) : `sha256:${"3".repeat(64)}` });
+        expect(() => run(value, localRunning)).toThrow();
+    });
+    it("rejects local OCI archive bindings that do not match the running declaration", () => {
+        expect(() => run(localFixture(), { ...localRunning, appImageConfigId: undefined })).toThrow("Running OCI");
+        expect(() => run(localFixture(), { ...localRunning, appImageArchiveSha256: "4".repeat(64) })).toThrow("Running OCI");
+    });
+    it("checks the Gateway runtime archive hash separately from the source archive", () => {
+        const value = localFixture();
+        Object.assign(value.artifacts.proxy, { archiveSha256: value.components.proxy.sourceArchive.sha256 });
+        expect(() => run(value, localRunning)).toThrow("Gateway archive");
+    });
+    it("rejects a different otherwise valid Gateway archive in any runtime role", () => {
+        for (const role of ["shell", "assets", "deployment"]) {
+            const value = localFixture();
+            Object.assign(value.artifacts[role], {
+                archiveSha256: "3".repeat(64),
+                digest: `sha256:${"3".repeat(64)}`,
+                uri: "https://github.com/fandy20082008/GoldCube-Gateway/releases/download/goldcube-v0.0.7-custom.13/other-runtime.tar.gz",
+            });
+            expect(() => run(value, localRunning)).toThrow("Gateway archive");
+        }
+        const value = localFixture();
+        value.artifacts.shell.uri = "https://github.com/fandy20082008/GoldCube-Gateway/releases/download/goldcube-v0.0.7-custom.13/other-runtime.tar.gz";
+        expect(() => run(value, localRunning)).toThrow("Gateway archive");
+    });
+    it("rejects a fabricated Docs artifact in the no-Docs deployment", () => {
+        const value = localFixture();
+        value.artifacts.docs = value.artifacts.app;
+        expect(() => run(value, localRunning)).toThrow("artifact roles");
+    });
+    it("requires an explicit material delivery status and never relabels deferred as complete", () => {
+        const value = localFixture();
+        value.deliveryStatus.libvips = "approved";
+        expect(() => run(value, localRunning)).toThrow("scope");
+        value.deliveryStatus.libvips = "complete";
+        expect(run(value, localRunning).deliveryStatus?.libvips).toBe("complete");
     });
 });
