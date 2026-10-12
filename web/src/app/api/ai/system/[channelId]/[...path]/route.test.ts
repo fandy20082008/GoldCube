@@ -502,6 +502,22 @@ describe("Agnes video polling proxy", () => {
         expect(response.status).toBe(404);
         expect(fetchMock).not.toHaveBeenCalled();
     });
+
+    it("decodes Chinese video model headers for GET polling ownership checks", async () => {
+        const model = "wan3-1080特价";
+        const settings = await mocks.getAuthSettings();
+        settings.logicalModels[0].bindings[0].upstreamModel = model;
+        settings.systemChannels[0].models = [model];
+        mocks.getAuthSettings.mockResolvedValue(settings);
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ id: "video-one", status: "processing" }));
+        const response = await GET(new Request("http://localhost/api/ai/system/channel-one/videos/video-one", { headers: systemAiBillingHeaders("agnes-video", undefined, model) }), {
+            params: Promise.resolve({ channelId: "channel-one", path: ["videos", "video-one"] }),
+        });
+        expect(response.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(mocks.taskAccess).toHaveBeenCalledWith({ userId: "user-one", capability: "video", channelId: "channel-one", upstreamModel: model, upstreamTaskId: "video-one" });
+        expect(mocks.consumeUserPoints).not.toHaveBeenCalled();
+    });
 });
 
 describe("Stable Diffusion proxy", () => {
@@ -553,6 +569,35 @@ describe("Stable Diffusion proxy", () => {
         expect(response.status).toBe(200);
         expect(fetchMock.mock.calls[0][0]).toBe("https://sd.example.com/sdapi/v1/txt2img");
         expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("authorization")).toBeNull();
+    });
+
+    it("decodes Chinese header-only models before access checks and signed billing", async () => {
+        const model = "wan3-1080特价";
+        const logicalModel = "视频模型";
+        const settings = await mocks.getAuthSettings();
+        settings.logicalModels[0].id = logicalModel;
+        settings.logicalModels[0].bindings[0].upstreamModel = model;
+        settings.systemChannels[0].models = [model];
+        mocks.getAuthSettings.mockResolvedValue(settings);
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ images: ["fixture"] }));
+        const response = await POST(
+            new Request("http://localhost/api/ai/system/channel-one/sdapi/v1/txt2img", {
+                method: "POST",
+                headers: { "content-type": "application/json", ...systemAiBillingHeaders(logicalModel, "chinese-fixture", model) },
+                body: JSON.stringify({ prompt: "synthetic fixture" }),
+            }),
+            { params: Promise.resolve({ channelId: "channel-one", path: ["sdapi", "v1", "txt2img"] }) },
+        );
+        expect(response.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(mocks.consumeUserPoints).toHaveBeenCalledWith(
+            "user-one",
+            logicalModel,
+            expect.any(Number),
+            "image",
+            systemAiPointsIdempotencyKey({ userId: "user-one", businessRequestId: "chinese-fixture", logicalModel, channelId: "channel-one", upstreamModel: model, callType: "image:create:/sdapi/v1/txt2img" }),
+            expect.any(String),
+        );
     });
 
     it("fully receives a non-streaming image JSON response before returning it internally", async () => {

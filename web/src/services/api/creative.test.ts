@@ -160,6 +160,56 @@ describe("统一创作 Agent 事件流", () => {
         expect(FakeEventSource.instance.url).toBe("/api/agent/runs/run-waiting/events");
     });
 
+    it("preserves automatic review pauses through live events and snapshots", () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const progress = vi.fn();
+        const snapshot = vi.fn();
+        const status = vi.fn();
+        const terminal = vi.fn();
+        const fetch = vi.fn();
+        vi.stubGlobal("fetch", fetch);
+        watchCreativeAgentRun("run-review", { onProgress: progress, onSnapshot: snapshot, onStatus: status, onTerminal: terminal, onConnectionError: vi.fn() });
+        FakeEventSource.instance.emit("run.snapshot", { status: "running", tasks: [{ id: "video", title: "视频", type: "video", status: "running" }] });
+        FakeEventSource.instance.emit("task.needs_review", { data: { taskId: "video", title: "视频", type: "video", error: "上游响应无法解析" } });
+        FakeEventSource.instance.emit("run.paused", { data: { message: "上游创建结果待确认，任务已暂停并保留原任务身份" } });
+        expect(status).toHaveBeenLastCalledWith("paused");
+        expect(snapshot).toHaveBeenLastCalledWith({ status: "paused", tasks: [expect.objectContaining({ id: "video", status: "needs_review", error: "上游响应无法解析" })] });
+        expect(progress).toHaveBeenLastCalledWith(expect.stringContaining("任务已自动暂停"));
+        expect(progress).toHaveBeenLastCalledWith(expect.stringContaining("上游响应无法解析"));
+        FakeEventSource.instance.emit("run.snapshot", { status: "paused", tasks: [{ id: "video", title: "视频", type: "video", status: "needs_review", error: "上游响应无法解析" }] });
+        expect(progress).toHaveBeenLastCalledWith(expect.stringContaining("任务已自动暂停"));
+        expect(terminal).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
+        expect(FakeEventSource.instance.closed).toBe(false);
+    });
+
+    it("keeps manual pauses distinct from review pauses", () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const progress = vi.fn();
+        const status = vi.fn();
+        watchCreativeAgentRun("run-manual", { onProgress: progress, onStatus: status, onTerminal: vi.fn(), onConnectionError: vi.fn() });
+        FakeEventSource.instance.emit("run.paused", {});
+        expect(status).toHaveBeenLastCalledWith("paused");
+        expect(progress).toHaveBeenLastCalledWith("任务已暂停，当前进度已经为你保存");
+    });
+
+    it("restores review state after a disconnect without resubmitting or claiming generation resumed", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const tasks = [{ id: "video", title: "视频", type: "video", status: "needs_review", error: "上游创建状态待确认" }];
+        const fetch = vi.fn(async () => Response.json({ code: 0, data: { run: { status: "paused", tasks } } }));
+        vi.stubGlobal("fetch", fetch);
+        const progress = vi.fn();
+        const snapshot = vi.fn();
+        watchCreativeAgentRun("run-review-reconnect", { onProgress: progress, onSnapshot: snapshot, onTerminal: vi.fn(), onConnectionError: vi.fn() });
+
+        FakeEventSource.instance.onerror?.();
+        await vi.waitFor(() => expect(snapshot).toHaveBeenCalledWith({ status: "paused", tasks }));
+        FakeEventSource.instance.onopen?.();
+        expect(progress).toHaveBeenLastCalledWith(expect.stringContaining("任务已自动暂停"));
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(fetch).toHaveBeenCalledWith("/api/agent/runs/run-review-reconnect", { cache: "no-store" });
+    });
+
     it("forwards a persistent project handoff before the run completes", () => {
         vi.stubGlobal("EventSource", FakeEventSource);
         const handoffs: CreativeProjectHandoff[] = [];

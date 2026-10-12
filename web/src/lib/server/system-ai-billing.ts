@@ -18,15 +18,32 @@ export function systemAiBillingHeaders(logicalModel: string, idempotencyKey?: st
     const normalizedIdempotencyKey = idempotencyKey?.trim();
     const normalizedUpstreamModel = upstreamModel?.trim();
     return {
-        ...(normalizedLogicalModel ? { [SYSTEM_AI_LOGICAL_MODEL_HEADER]: normalizedLogicalModel } : {}),
+        ...systemAiModelHeader(SYSTEM_AI_LOGICAL_MODEL_HEADER, normalizedLogicalModel),
         ...(normalizedIdempotencyKey
             ? {
                   [SYSTEM_AI_POINTS_IDEMPOTENCY_HEADER]: normalizedIdempotencyKey,
                   [SYSTEM_AI_POINTS_SIGNATURE_HEADER]: signSystemAiBusinessRequest(normalizedLogicalModel, normalizedIdempotencyKey, normalizedUpstreamModel || ""),
               }
             : {}),
-        ...(normalizedUpstreamModel ? { [SYSTEM_AI_UPSTREAM_MODEL_HEADER]: normalizedUpstreamModel } : {}),
+        ...systemAiModelHeader(SYSTEM_AI_UPSTREAM_MODEL_HEADER, normalizedUpstreamModel || ""),
     };
+}
+
+type SystemAiModelHeader = typeof SYSTEM_AI_LOGICAL_MODEL_HEADER | typeof SYSTEM_AI_UPSTREAM_MODEL_HEADER;
+
+function systemAiModelHeader(name: SystemAiModelHeader, value: string) {
+    if (!value) return {};
+    return /[^\x20-\x7e]/.test(value) ? { [name]: encodeURIComponent(value), [`${name}-encoding`]: "uri-utf8" } : { [name]: value };
+}
+
+export function readSystemAiModelHeader(headers: Headers, name: SystemAiModelHeader) {
+    const value = headers.get(name)?.trim() || "";
+    if (headers.get(`${name}-encoding`) !== "uri-utf8") return value;
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return "";
+    }
 }
 
 export function readVerifiedSystemAiBusinessRequestId(headers: Headers, logicalModel: string, upstreamModel: string) {

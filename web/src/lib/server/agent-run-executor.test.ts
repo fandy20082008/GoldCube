@@ -419,7 +419,9 @@ describe("executeAgentRun backend settings", () => {
             if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-review" } });
             if (url.endsWith("/api/image-tasks/child-review")) {
                 polls += 1;
-                return polls === 1 ? Response.json({ task: { status: "running", needsReview: true, reviewReason: "上游创建状态待确认" } }) : Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/recovered.png" } } });
+                return polls === 1
+                    ? Response.json({ task: { status: "running", needsReview: true, reviewReason: "上游响应暂时无法解析，创建状态待确认" } })
+                    : Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/recovered.png" } } });
             }
             throw new Error(`unexpected request: ${url}`);
         });
@@ -429,7 +431,14 @@ describe("executeAgentRun backend settings", () => {
         expect(mocks.fetchInternalApi.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
         expect(mocks.run).toMatchObject({
             status: "paused",
-            tasks: [expect.objectContaining({ status: "needs_review", taskId: "child-review", childTasks: [expect.objectContaining({ id: "child-review", status: "needs_review" })] })],
+            tasks: [
+                expect.objectContaining({
+                    status: "needs_review",
+                    error: "上游响应暂时无法解析，创建状态待确认",
+                    taskId: "child-review",
+                    childTasks: [expect.objectContaining({ id: "child-review", status: "needs_review", error: "上游响应暂时无法解析，创建状态待确认" })],
+                }),
+            ],
         });
         expect(mocks.events.some((event) => event.type === "task.needs_review")).toBe(true);
         expect(mocks.events.some((event) => event.type === "run.paused")).toBe(true);
@@ -768,7 +777,7 @@ describe("executeAgentRun backend settings", () => {
             timeoutSpy.mockRestore();
         }
 
-        expect(timeoutCalls).toContain(3 * 60_000);
+        expect(timeoutCalls).toContain(10 * 60_000);
         expect(mocks.fetchInternalApi.mock.calls.map(([url]) => String(url))).toEqual([expect.stringMatching(/\/chat\/completions$/)]);
         expect(mocks.run?.status).toBe("failed");
         expect(mocks.events.some((event) => event.type === "run.completed")).toBe(false);

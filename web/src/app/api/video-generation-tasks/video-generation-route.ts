@@ -34,6 +34,7 @@ import { normalizeVideoGenerationReferences, regularVideoReferences, videoFrameR
 import { assertYumengVideoReferences, buildYumengVideoRequest } from "@/lib/yumeng-model-center";
 import { normalizeVideoProviderImageReferences } from "@/lib/server/video-reference-image";
 import { uploadVideoReferences, VideoReferenceUploadError, type VideoReferenceSubmission } from "@/lib/server/video-reference-upload";
+import type { GenerationTaskExecutionState } from "@/lib/server/generation-task-types";
 
 const CREATE_PATHS = ["/video/generations", "/videos/generations", "/videos/videos", "/videos"];
 type CreateVideoTaskBody = { config?: Record<string, unknown>; prompt?: string; references?: VideoGenerationReference[]; source?: string; context?: GenerationTaskContext };
@@ -231,10 +232,12 @@ export async function POST(request: Request) {
                         await updateVideoTask(localTask.id, { upstream, attempts });
                         localTask = { ...localTask, upstream, attempts };
                     }
-                    const message = toSafeGenerationErrorMessage(error, "视频任务创建失败");
                     if (!(error instanceof SafeCandidateFailure) && !(error instanceof VideoReferenceUploadError)) {
-                        await scheduleGenerationTask("video", localTask.id, { executionPhase: "needs_review", nextPollAt: undefined, lastUpstreamStatus: "submission_outcome_unknown" });
-                        return NextResponse.json({ task: { ...publicTask({ ...localTask, attempts }), needsReview: true }, warning: `${message}；上游创建结果待确认，系统不会自动重复创建。` }, { status: 202 });
+                        const submissionDiagnostics = error instanceof VideoSubmissionUncertainError ? error.diagnostics : { category: "submission_error" as const };
+                        const reviewReason = videoSubmissionReviewReason(submissionDiagnostics);
+                        const executionState = { executionPhase: "needs_review" as const, lastUpstreamStatus: "submission_outcome_unknown", reviewReason };
+                        await scheduleGenerationTask("video", localTask.id, { ...executionState, nextPollAt: undefined, resultPayload: { reviewReason, submissionDiagnostics } });
+                        return NextResponse.json({ task: publicTask({ ...localTask, attempts, ...executionState }), warning: reviewReason }, { status: 202 });
                     }
                     break;
                 }
@@ -475,14 +478,14 @@ export async function createUpstream(
                 await refundExplicitVideoSubmissionFailure(userId, channel, response.headers, raw, multipliers);
                 throw new ExplicitVideoSubmissionFailure(failure || lastError);
             }
-            if (!SAFE_CREATE_FAILURE_STATUSES.has(response.status)) throw new Error(lastError);
+            if (!SAFE_CREATE_FAILURE_STATUSES.has(response.status)) throw new VideoSubmissionUncertainError(lastError, videoSubmissionBilling(response.headers, raw, multipliers), { category: "http_error", httpStatus: response.status });
             continue;
         }
         let data: unknown;
         try {
             data = parseVideoProviderJson(text);
         } catch (error) {
-            throw new VideoSubmissionUncertainError(error instanceof Error ? error.message : "视频接口返回了无效 JSON", videoSubmissionBilling(response.headers, raw, multipliers));
+            throw new VideoSubmissionUncertainError(error instanceof Error ? error.message : "视频接口返回了无效 JSON", videoSubmissionBilling(response.headers, raw, multipliers), { category: "invalid_json", httpStatus: response.status });
         }
         const providerError = readProviderError(data);
         if (explicitVideoSubmissionFailure(data, channel.advancedConfig?.statusField)) {
@@ -492,7 +495,7 @@ export async function createUpstream(
         const resultUrl = readVideoProviderUrl(data, channel.advancedConfig?.resultField);
         const id = readVideoProviderId(data) || (resultUrl ? `direct:${Date.now()}` : "");
         if (!id) {
-            throw new VideoSubmissionUncertainError(providerError || "视频接口没有返回任务 ID", videoSubmissionBilling(response.headers, raw, multipliers));
+            throw new VideoSubmissionUncertainError(providerError || "视频接口没有返回任务 ID", videoSubmissionBilling(response.headers, raw, multipliers), { category: "missing_task_id", httpStatus: response.status });
         }
         return {
             id,
@@ -561,13 +564,13 @@ async function createGeminiVideoUpstream(input: {
             throw new ExplicitVideoSubmissionFailure(failure || message);
         }
         if (SAFE_CREATE_FAILURE_STATUSES.has(response.status)) throw new SafeCandidateFailure(message);
-        throw new Error(message);
+        throw new VideoSubmissionUncertainError(message, videoSubmissionBilling(response.headers, input.raw, input.multipliers), { category: "http_error", httpStatus: response.status });
     }
     let data: unknown;
     try {
         data = parseVideoProviderJson(text);
     } catch (error) {
-        throw new VideoSubmissionUncertainError(error instanceof Error ? error.message : "Gemini Veo 返回了无效 JSON", videoSubmissionBilling(response.headers, input.raw, input.multipliers));
+        throw new VideoSubmissionUncertainError(error instanceof Error ? error.message : "Gemini Veo 返回了无效 JSON", videoSubmissionBilling(response.headers, input.raw, input.multipliers), { category: "invalid_json", httpStatus: response.status });
     }
     const created = parseGeminiVideoCreateResponse(data, input.channel.model);
     const pointsCost = billedPointsCost(response.headers.get("x-vozeb-pro-points-cost"));
@@ -578,7 +581,7 @@ async function createGeminiVideoUpstream(input: {
         }
         throw new ExplicitVideoSubmissionFailure(created.error);
     }
-    if (!created.id) throw new VideoSubmissionUncertainError("Gemini Veo 没有返回 operation ID", videoSubmissionBilling(response.headers, input.raw, input.multipliers));
+    if (!created.id) throw new VideoSubmissionUncertainError("Gemini Veo 没有返回 operation ID", videoSubmissionBilling(response.headers, input.raw, input.multipliers), { category: "missing_task_id", httpStatus: response.status });
     return {
         id: created.id,
         provider: "generation" as const,
@@ -608,8 +611,16 @@ function proxyFetch(origin: string, baseUrl: string, path: string, cookie: strin
     else if (cookie) headers.set("cookie", cookie);
     return fetchInternalApi(`${origin}${baseUrl.replace(/\/+$/, "")}${path.startsWith("/") ? path : `/${path}`}`, { ...init, headers });
 }
-function publicTask(task: VideoTask) {
-    return { id: task.id, status: task.status, model: generationModelId(task.config), upstreamId: task.upstream.id || undefined, durationSeconds: task.requestedDurationSeconds, canRetry: task.retryable === true };
+function publicTask(task: VideoTask & GenerationTaskExecutionState) {
+    return {
+        id: task.id,
+        status: task.status,
+        model: generationModelId(task.config),
+        upstreamId: task.upstream.id || undefined,
+        durationSeconds: task.requestedDurationSeconds,
+        canRetry: task.retryable === true,
+        ...(task.executionPhase === "needs_review" ? { needsReview: true, reviewReason: task.reviewReason } : {}),
+    };
 }
 function duration(value: unknown) {
     return resolveVideoDuration(value, 5);
@@ -710,7 +721,8 @@ async function readVideoSubmissionResponse(response: Response, deadlineAt: numbe
         return await withinVideoSubmissionDeadline(() => response.text(), deadlineAt);
     } catch (error) {
         if (error instanceof VideoSubmissionDeadlineExceededError) await response.body?.cancel().catch(() => undefined);
-        throw error;
+        if (error instanceof VideoSubmissionDeadlineExceededError) throw error;
+        throw new VideoSubmissionUncertainError("视频接口响应读取中断", undefined, { category: "response_read_error", httpStatus: response.status });
     }
 }
 
@@ -720,14 +732,30 @@ async function fetchWithinVideoSubmissionDeadline(operation: () => Promise<Respo
         return await operation();
     } catch (error) {
         if (Date.now() >= deadlineAt || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))) throw new VideoSubmissionDeadlineExceededError();
-        throw error;
+        throw new VideoSubmissionUncertainError("视频接口连接中断", undefined, { category: "transport_error" });
     }
+}
+
+type VideoSubmissionDiagnostics = { category: "submission_error" | "http_error" | "invalid_json" | "missing_task_id" | "response_read_error" | "transport_error" | "deadline_exceeded"; httpStatus?: number };
+
+function videoSubmissionReviewReason(diagnostics: VideoSubmissionDiagnostics) {
+    const reasons: Record<VideoSubmissionDiagnostics["category"], string> = {
+        submission_error: "视频任务创建过程异常",
+        http_error: `视频创建接口返回 HTTP ${diagnostics.httpStatus}`,
+        invalid_json: "视频创建接口返回了无效 JSON",
+        missing_task_id: "视频创建接口未返回可查询的任务 ID",
+        response_read_error: "视频创建接口响应读取中断",
+        transport_error: "视频创建接口连接中断",
+        deadline_exceeded: "视频任务创建等待已达到最大时限",
+    };
+    return `${reasons[diagnostics.category]}；上游创建结果待确认，为避免重复生成和扣费，系统已停止自动重试。`;
 }
 
 class VideoSubmissionUncertainError extends Error {
     constructor(
         message: string,
         readonly billing?: Pick<VideoTask["upstream"], "pointsCost" | "pointsUnits" | "pointsRecordId" | "refunded">,
+        readonly diagnostics: VideoSubmissionDiagnostics = { category: "submission_error" },
     ) {
         super(message);
         this.name = "VideoSubmissionUncertainError";
@@ -735,7 +763,7 @@ class VideoSubmissionUncertainError extends Error {
 }
 class VideoSubmissionDeadlineExceededError extends VideoSubmissionUncertainError {
     constructor() {
-        super("视频任务创建等待已达到最大时限");
+        super("视频任务创建等待已达到最大时限", undefined, { category: "deadline_exceeded" });
         this.name = "VideoSubmissionDeadlineExceededError";
     }
 }

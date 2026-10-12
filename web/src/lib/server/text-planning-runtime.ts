@@ -4,7 +4,7 @@ import { fetchInternalApi } from "@/lib/server/internal-origin";
 import { resolveModelRequestTimeoutMs } from "@/lib/server/model-request-policy";
 import { buildProviderRequest, isProviderBusinessError, readProviderError, readProviderString, readProviderValue } from "@/lib/server/provider-task-config";
 import { extractJsonObjectText, hasIncompleteJsonObject } from "@/lib/server/structured-model-output";
-import { SYSTEM_AI_LOGICAL_MODEL_HEADER, SYSTEM_AI_POINTS_IDEMPOTENCY_HEADER, SYSTEM_AI_UPSTREAM_MODEL_HEADER, systemAiBillingHeaders } from "@/lib/server/system-ai-billing";
+import { readSystemAiModelHeader, SYSTEM_AI_LOGICAL_MODEL_HEADER, SYSTEM_AI_POINTS_IDEMPOTENCY_HEADER, SYSTEM_AI_UPSTREAM_MODEL_HEADER, systemAiBillingHeaders } from "@/lib/server/system-ai-billing";
 import { interpolateModelPath, resolveTextProtocol } from "@/lib/server/text-protocol-resolver";
 import { resolveChannelModelConfig } from "@/lib/channel-protocol-registry";
 
@@ -269,9 +269,9 @@ async function requestTextProtocol(input: StructuredTextRequest, request: Protoc
 
 function repairRequestHeaders(input: StructuredTextRequest) {
     const headers = new Headers(input.fallbackHeaders || input.headers);
-    const logicalModel = headers.get(SYSTEM_AI_LOGICAL_MODEL_HEADER)?.trim();
+    const logicalModel = readSystemAiModelHeader(headers, SYSTEM_AI_LOGICAL_MODEL_HEADER);
     const businessRequestId = headers.get(SYSTEM_AI_POINTS_IDEMPOTENCY_HEADER)?.trim();
-    const upstreamModel = headers.get(SYSTEM_AI_UPSTREAM_MODEL_HEADER)?.trim() || input.candidate.upstreamModel;
+    const upstreamModel = readSystemAiModelHeader(headers, SYSTEM_AI_UPSTREAM_MODEL_HEADER) || input.candidate.upstreamModel;
     if (!logicalModel || !businessRequestId) return headers;
     Object.entries(systemAiBillingHeaders(logicalModel, `${businessRequestId}:repair`, upstreamModel)).forEach(([name, value]) => headers.set(name, value));
     return headers;

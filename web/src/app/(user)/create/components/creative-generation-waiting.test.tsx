@@ -28,6 +28,32 @@ describe("creative generation waiting", () => {
         expect(formatCreativeWaitingTime(3_661)).toBe("1小时1分1秒");
     });
 
+    it("explains review pauses and stops presenting them as continued rendering or waiting", () => {
+        const run = {
+            id: "review",
+            conversationId: "conversation",
+            inputMessageId: "input",
+            assistantMessageId: "assistant",
+            status: "paused",
+            generationPreferences: { mode: "video" },
+            assetIds: [],
+            tasks: [{ id: "video", title: "视频", type: "video", status: "needs_review", error: "上游创建状态待确认" }],
+            createdAt: Date.now() - 104_000,
+        } satisfies CreativeAgentRun;
+        const markup = renderToStaticMarkup(<CreativeGenerationWaiting run={run} message={{ content: "正在处理创作任务", createdAt: run.createdAt }} />);
+        expect(markup).toContain("上游是否已接收这次生成尚未确认");
+        expect(markup).toContain("任务已自动暂停");
+        expect(markup).toContain("核实提示：上游创建状态待确认");
+        expect(markup).toContain("勿重复提交");
+        expect(markup).not.toContain("想继续时叫我");
+        expect(markup).not.toContain("creative-generation-elapsed");
+        expect(markup).not.toContain("creative-media-waiting-visual");
+        expect(markup).not.toContain("animate-pulse");
+        expect(renderWaiting("video", "paused")).toContain("任务已暂停，当前进度已保存");
+        expect(renderWaiting("video", "paused")).not.toContain("任务已自动暂停");
+        expect(renderWaiting("video", "paused")).not.toContain("creative-generation-elapsed");
+    });
+
     it("shows the responsive ambient placeholder only for active image and video runs", () => {
         expect(shouldShowCreativeMediaWaiting("image", "planning")).toBe(true);
         expect(shouldShowCreativeMediaWaiting("video", "running")).toBe(true);

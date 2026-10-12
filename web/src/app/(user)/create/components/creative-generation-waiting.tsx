@@ -15,31 +15,38 @@ export function CreativeGenerationWaiting({ run, message }: { run?: CreativeAgen
     const startedAt = run?.createdAt || message.createdAt;
     const [now, setNow] = useState(() => Date.now());
     const mode = creativeRunMode(run);
+    const reviewTask = run?.tasks.find((task) => task.status === "needs_review");
+    const needsReview = Boolean(reviewTask) || /上游创建.*待.*确认/.test(message.content);
+    const waiting = !needsReview && run?.status !== "paused";
 
     useEffect(() => {
+        if (!waiting) return;
         const update = () => setNow(Date.now());
         update();
         const timer = window.setInterval(update, 1000);
         return () => window.clearInterval(timer);
-    }, [startedAt]);
+    }, [startedAt, waiting]);
 
     const elapsedSeconds = Math.max(0, Math.floor((now - startedAt) / 1000));
-    const copy = creativeGenerationWaitingCopy({ mode, runStatus: run?.status, progressText: message.content, elapsedSeconds });
+    const copy = creativeGenerationWaitingCopy({ mode, runStatus: run?.status, progressText: message.content, elapsedSeconds, needsReview });
 
     return (
         <div data-testid="creative-generation-waiting" className="mb-3 max-w-[520px] py-1 text-[#667085] dark:text-[#a0a9b4]">
             <div className="flex items-start gap-2.5">
-                <Sparkles className="mt-1 size-4 shrink-0 text-primary/75 motion-safe:animate-pulse" aria-hidden />
+                <Sparkles className={`mt-1 size-4 shrink-0 text-primary/75${waiting ? " motion-safe:animate-pulse" : ""}`} aria-hidden />
                 <div className="min-w-0">
                     <p className="text-sm leading-6 text-[#596474] dark:text-[#b0b8c2]" aria-live="polite">
                         {copy}
                     </p>
-                    <p data-testid="creative-generation-elapsed" className="mt-0.5 text-[11px] tabular-nums leading-4 text-[#98a2b3] dark:text-[#7f8996]">
-                        已等待 {formatCreativeWaitingTime(elapsedSeconds)}
-                    </p>
+                    {reviewTask?.error ? <p className="mt-1 text-xs leading-5">核实提示：{reviewTask.error}</p> : null}
+                    {waiting ? (
+                        <p data-testid="creative-generation-elapsed" className="mt-0.5 text-[11px] tabular-nums leading-4 text-[#98a2b3] dark:text-[#7f8996]">
+                            已等待 {formatCreativeWaitingTime(elapsedSeconds)}
+                        </p>
+                    ) : null}
                 </div>
             </div>
-            {shouldShowCreativeMediaWaiting(mode, run?.status) ? <CreativeMediaWaitingVisual mode={mode} /> : null}
+            {waiting && shouldShowCreativeMediaWaiting(mode, run?.status) ? <CreativeMediaWaitingVisual mode={mode} /> : null}
         </div>
     );
 }
@@ -90,9 +97,22 @@ export function shouldShowCreativeMediaWaiting(mode: "text" | "image" | "video" 
     return (mode === "image" || mode === "video") && (runStatus === "planning" || runStatus === "running");
 }
 
-export function creativeGenerationWaitingCopy({ mode, runStatus, progressText, elapsedSeconds }: { mode?: "text" | "image" | "video" | "audio"; runStatus?: CreativeAgentRun["status"]; progressText: string; elapsedSeconds: number }) {
+export function creativeGenerationWaitingCopy({
+    mode,
+    runStatus,
+    progressText,
+    elapsedSeconds,
+    needsReview = false,
+}: {
+    mode?: "text" | "image" | "video" | "audio";
+    runStatus?: CreativeAgentRun["status"];
+    progressText: string;
+    elapsedSeconds: number;
+    needsReview?: boolean;
+}) {
     const progress = progressText.trim();
-    if (runStatus === "paused" || /任务已暂停/.test(progress)) return "主人，任务已经替你暂停，进度好好保存着，想继续时叫我就好。";
+    if (needsReview || /上游创建.*待.*确认/.test(progress)) return "上游是否已接收这次生成尚未确认，任务已自动暂停并保留原任务。请先核实原任务状态，勿重复提交，以免重复生成或扣费。";
+    if (runStatus === "paused" || /任务已暂停/.test(progress)) return "任务已暂停，当前进度已保存。";
     if (/连接暂时中断|无法确认实时状态/.test(progress)) return "主人，连接刚刚有些不稳，不过任务仍在后台继续，我正在替你确认。";
     if (/连接已恢复|恢复连接/.test(progress)) return "主人，连接恢复啦，我会继续守着这次创作。";
     if (/检查完成|正在整理|创作结果/.test(progress)) return "主人，作品已经生成，我正在整理最后的细节，很快就能交到你手上。";

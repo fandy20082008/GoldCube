@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.0.7-custom.16
+
+- Preserve Unicode model identities across internal HTTP headers, authorization, billing and polling without changing provider request bodies.
+- Persist safe submission diagnostics and distinguish automatic review from user pauses. Do not recreate uncertain upstream tasks.
+
 ## v0.0.7-custom.15
 
 - Allow harmless punctuation, quote and whitespace differences in drama source fragments while rejecting lost, repeated or reordered content.

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readSystemAiModelHeader, readVerifiedSystemAiBusinessRequestId, SYSTEM_AI_UPSTREAM_MODEL_HEADER, systemAiBillingHeaders } from "./system-ai-billing";
 
 import type { SystemChannelAdvancedConfig, SystemModelChannel } from "@/lib/auth/store";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
@@ -191,8 +192,8 @@ describe("text planning runtime protocol matrix", () => {
 
         const result = await requestStructuredText({
             ...requestInput(candidate("newapi")),
-            headers: { "idempotency-key": "planning-repair", "x-vozeb-pro-logical-model": "planner", "x-vozeb-pro-points-idempotency-key": "billing-tool" },
-            fallbackHeaders: { "idempotency-key": "planning-repair", "x-vozeb-pro-logical-model": "planner", "x-vozeb-pro-points-idempotency-key": "billing-json" },
+            headers: { "idempotency-key": "planning-repair", ...systemAiBillingHeaders("规划模型", "billing-tool", "文本特价%20literal") },
+            fallbackHeaders: { "idempotency-key": "planning-repair", ...systemAiBillingHeaders("规划模型", "billing-json", "文本特价%20literal") },
             preferNativeTools: true,
             validateArguments: (argumentsText) => !("script" in JSON.parse(argumentsText)),
             onInvalidResponse,
@@ -206,6 +207,9 @@ describe("text planning runtime protocol matrix", () => {
         expect(JSON.stringify(repairBody.messages)).toContain("上一轮响应没有通过结构校验");
         expect(new Headers(mockedFetch.mock.calls[2]?.[1]?.headers).get("idempotency-key")).toBe("planning-repair:chat-repair");
         expect(new Headers(mockedFetch.mock.calls[2]?.[1]?.headers).get("x-vozeb-pro-points-idempotency-key")).toBe("billing-json:repair");
+        const repairHeaders = new Headers(mockedFetch.mock.calls[2]?.[1]?.headers);
+        expect(readSystemAiModelHeader(repairHeaders, SYSTEM_AI_UPSTREAM_MODEL_HEADER)).toBe("文本特价%20literal");
+        expect(readVerifiedSystemAiBusinessRequestId(repairHeaders, "规划模型", "文本特价%20literal")).toBe("billing-json:repair");
         expect(onInvalidResponse).toHaveBeenCalledTimes(2);
     });
 

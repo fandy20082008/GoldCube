@@ -167,6 +167,8 @@ export function watchCreativeAgentRun(runId: string, handlers: CreativeRunHandle
     let settled = false;
     let connectionInterrupted = false;
     let reconciliation: Promise<void> | null = null;
+    let currentStatus: CreativeAgentRun["status"] = "running";
+    let currentTasks: CreativeAgentRun["tasks"] = [];
     const read = (event: Event) => {
         let parsed: { data?: Record<string, unknown>; status?: string; tasks?: unknown };
         try {
@@ -197,12 +199,14 @@ export function watchCreativeAgentRun(runId: string, handlers: CreativeRunHandle
         try {
             const run = await getCreativeAgentRun(runId);
             if (settled) return;
+            currentStatus = run.status;
+            currentTasks = run.tasks;
             handlers.onSnapshot?.({ status: run.status, tasks: run.tasks });
             handlers.onStatus?.(run.status);
             if (run.status === "completed") return finish("completed");
             if (run.status === "failed") return finish("failed", run.tasks.find((task) => task.status === "failed")?.error || "Agent 执行失败");
             if (run.status === "cancelled") return finish("cancelled", "任务已取消");
-            handlers.onProgress(run.status === "paused" ? "任务仍在后台保存，当前处于暂停状态" : "任务仍在后台运行，正在恢复连接");
+            handlers.onProgress(run.status === "paused" ? creativePausedProgress(run.tasks) : "任务仍在后台运行，正在恢复连接");
         } catch (error) {
             if (settled) return;
             if (error instanceof ClientSessionExpiredError) {
@@ -227,7 +231,25 @@ export function watchCreativeAgentRun(runId: string, handlers: CreativeRunHandle
         void refreshUserPointsIfSystem("system");
         handlers.onProgress(text(data?.reply) || "方案已确定，正在创建任务");
         const tasks = plannedTasks(data?.tasks);
-        if (tasks) handlers.onPlanned?.(tasks);
+        if (tasks) {
+            currentTasks = tasks;
+            currentStatus = "running";
+            handlers.onPlanned?.(tasks);
+        }
+    });
+    listen("task.needs_review", ({ data }) => {
+        const taskId = text(data?.taskId);
+        const error = text(data?.error) || "上游创建状态待确认";
+        const task = snapshotTasks([{ ...data, id: taskId, status: "needs_review" }])?.[0];
+        currentTasks = currentTasks.some((item) => item.id === taskId) ? currentTasks.map((item) => (item.id === taskId ? { ...item, status: "needs_review", error } : item)) : task ? [...currentTasks, { ...task, error }] : currentTasks;
+        handlers.onSnapshot?.({ status: currentStatus, tasks: currentTasks });
+        handlers.onProgress(`上游创建状态待确认：${error}。请先核实原任务，勿重复提交。`);
+    });
+    listen("run.paused", ({ data }) => {
+        currentStatus = "paused";
+        handlers.onSnapshot?.({ status: currentStatus, tasks: currentTasks });
+        handlers.onStatus?.(currentStatus);
+        handlers.onProgress(currentTasks.some((task) => task.status === "needs_review") ? creativePausedProgress(currentTasks) : text(data?.message) || creativePausedProgress(currentTasks));
     });
     listen("task.running", ({ data }) => handlers.onProgress(`正在处理「${text(data?.title) || "创作任务"}」`));
     listen("task.waiting", ({ data }) => handlers.onProgress(text(data?.error) || `「${text(data?.title) || "创作任务"}」仍在上游处理中，系统会继续恢复`));
@@ -263,17 +285,21 @@ export function watchCreativeAgentRun(runId: string, handlers: CreativeRunHandle
     listen("run.snapshot", (payload) => {
         if (payload.status && ["planning", "running", "paused", "completed", "failed", "cancelled"].includes(payload.status)) {
             const status = payload.status as CreativeAgentRun["status"];
+            currentStatus = status;
             handlers.onStatus?.(status);
             const tasks = snapshotTasks(payload.tasks);
-            if (tasks) handlers.onSnapshot?.({ status, tasks });
+            if (tasks) {
+                currentTasks = tasks;
+                handlers.onSnapshot?.({ status, tasks });
+            }
         }
         if (payload.status === "completed") finish("completed");
         if (payload.status === "failed") finish("failed", "Agent 执行失败");
         if (payload.status === "cancelled") finish("cancelled", "任务已取消");
-        if (payload.status === "paused") handlers.onProgress("任务已暂停，当前进度已经为你保存");
+        if (payload.status === "paused") handlers.onProgress(creativePausedProgress(currentTasks));
     });
     source.onopen = () => {
-        if (connectionInterrupted && !settled) handlers.onProgress("连接已恢复，任务继续运行");
+        if (connectionInterrupted && !settled) handlers.onProgress(currentStatus === "paused" ? creativePausedProgress(currentTasks) : "连接已恢复，任务继续运行");
         connectionInterrupted = false;
     };
     source.onerror = () => {
@@ -288,6 +314,11 @@ export function watchCreativeAgentRun(runId: string, handlers: CreativeRunHandle
         settled = true;
         source.close();
     };
+}
+
+function creativePausedProgress(tasks: CreativeAgentRun["tasks"]) {
+    const review = tasks.find((task) => task.status === "needs_review");
+    return review ? `上游创建状态待确认，任务已自动暂停。${review.error || ""} 请先核实原任务，勿重复提交。` : "任务已暂停，当前进度已经为你保存";
 }
 
 async function request<T>(url: string, init?: RequestInit) {

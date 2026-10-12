@@ -63,6 +63,7 @@ vi.mock("@/lib/server/video-task-store", () => ({
 
 import { POST } from "./route";
 import { resetChannelRuntimeHealth } from "@/lib/server/channel-runtime-health";
+import { readSystemAiModelHeader, readVerifiedSystemAiBusinessRequestId, SYSTEM_AI_UPSTREAM_MODEL_HEADER } from "@/lib/server/system-ai-billing";
 
 const channels = [
     { id: "one", name: "主渠道", baseUrl: "https://one.example.com/v1", apiKey: "one-secret", apiFormat: "openai", models: ["video-one"], enabled: true, advancedConfig: { protocol: "openai" } },
@@ -109,6 +110,25 @@ describe("video generation candidate failover", () => {
     });
 
     afterEach(() => vi.unstubAllEnvs());
+
+    it("submits a Chinese upstream model through actual Headers without pausing before fetch", async () => {
+        const model = "wan3-1080特价";
+        mocks.getAuthSettings.mockResolvedValue({
+            ...settings,
+            systemChannels: [{ ...channels[0], models: [model] }],
+            logicalModels: [{ ...settings.logicalModels[0], bindings: [{ ...settings.logicalModels[0].bindings[0], upstreamModel: model }] }],
+        });
+        mocks.fetchInternalApi.mockResolvedValue(json({ id: "wan-upstream", status: "queued" }));
+        const response = await POST(request({ model: "video" }, [], { clientRequestId: "wan-fixture" }));
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ task: { upstreamId: "wan-upstream" } });
+        expect(mocks.fetchInternalApi).toHaveBeenCalledOnce();
+        const headers = new Headers(mocks.fetchInternalApi.mock.calls[0][1].headers);
+        expect(readSystemAiModelHeader(headers, SYSTEM_AI_UPSTREAM_MODEL_HEADER)).toBe(model);
+        expect(readVerifiedSystemAiBusinessRequestId(headers, "video", model)).toBe("video-request:wan-fixture");
+        expect(JSON.parse(String(mocks.fetchInternalApi.mock.calls[0][1].body)).model).toBe(model);
+        expect(mocks.scheduleGenerationTask).toHaveBeenLastCalledWith("video", "local-task", expect.objectContaining({ executionPhase: "submitted", upstreamTaskId: "wan-upstream" }));
+    });
 
     it("tries the next binding after explicit route failures", async () => {
         const startedAt = Date.now();
@@ -275,6 +295,63 @@ describe("video generation candidate failover", () => {
         expect(mocks.createVideoTask).toHaveBeenCalledOnce();
         expect(mocks.refundUserPoints).not.toHaveBeenCalled();
         expect(mocks.scheduleGenerationTask).toHaveBeenLastCalledWith("video", "local-task", expect.objectContaining({ executionPhase: "needs_review", lastUpstreamStatus: "submission_outcome_unknown" }));
+    });
+
+    it.each([
+        ["invalid_json", 200, "invalid", "无效 JSON"],
+        ["missing_task_id", 200, "missing", "未返回可查询的任务 ID"],
+        ["http_error", 502, "http", "HTTP 502"],
+        ["transport_error", undefined, "transport", "连接中断"],
+        ["response_read_error", 200, "read", "响应读取中断"],
+        ["deadline_exceeded", undefined, "timeout", "最大时限"],
+    ] as const)("persists safe %s diagnostics and returns the same review reason without retrying", async (category, httpStatus, mode, reason) => {
+        const secret = "Authorization: Bearer one-secret cookie=session-secret prompt=private-customer-text https://private.example/media?signature=signed-secret";
+        if (mode === "transport") mocks.fetchInternalApi.mockRejectedValue(new TypeError(secret, { cause: { code: "ECONNRESET", address: "private-address" } }));
+        else if (mode === "timeout") mocks.fetchInternalApi.mockRejectedValue(Object.assign(new Error(secret), { name: "TimeoutError" }));
+        else if (mode === "read") {
+            const response = json({});
+            vi.spyOn(response, "text").mockRejectedValue(new Error(secret));
+            mocks.fetchInternalApi.mockResolvedValue(response);
+        } else mocks.fetchInternalApi.mockResolvedValue(mode === "invalid" ? new Response(secret, { status: httpStatus }) : json({ message: secret }, httpStatus));
+
+        const response = await POST(request());
+        const payload = await response.json();
+        const patch = mocks.scheduleGenerationTask.mock.lastCall?.[2];
+
+        expect(response.status).toBe(202);
+        expect(payload.task).toMatchObject({ status: "running", needsReview: true, canRetry: false, reviewReason: expect.stringContaining(reason) });
+        expect(payload.warning).toBe(payload.task.reviewReason);
+        expect(patch).toMatchObject({
+            executionPhase: "needs_review",
+            lastUpstreamStatus: "submission_outcome_unknown",
+            resultPayload: { reviewReason: payload.task.reviewReason, submissionDiagnostics: { category, ...(httpStatus ? { httpStatus } : {}) } },
+        });
+        expect(patch.nextPollAt).toBeUndefined();
+        expect(Object.keys(patch.resultPayload.submissionDiagnostics).sort()).toEqual(httpStatus ? ["category", "httpStatus"] : ["category"]);
+        const exposed = JSON.stringify({ payload, patch, updates: mocks.updateVideoTask.mock.calls });
+        for (const value of ["one-secret", "session-secret", "private-customer-text", "private.example", "signed-secret", "private-address", "Authorization"]) expect(exposed).not.toContain(value);
+        expect(mocks.fetchInternalApi).toHaveBeenCalledTimes(1);
+        expect(mocks.refundUserPoints).not.toHaveBeenCalled();
+        expect(mocks.transitionVideoTask).not.toHaveBeenCalled();
+        expect(mocks.after).not.toHaveBeenCalled();
+    });
+
+    it("preserves a persisted needs-review reason on idempotent resubmission without creating upstream work", async () => {
+        mocks.getStoredGenerationTaskByRequest.mockResolvedValueOnce({
+            id: "existing-task",
+            status: "running",
+            executionPhase: "needs_review",
+            lastUpstreamStatus: "submission_outcome_unknown",
+            reviewReason: "视频创建接口未返回可查询的任务 ID；上游创建结果待确认",
+            config: { model: "video-one", logicalModel: "video" },
+            upstream: { id: "" },
+        });
+
+        const response = await POST(request({ model: "video" }, [], { clientRequestId: "same-request" }));
+
+        expect(await response.json()).toMatchObject({ task: { id: "existing-task", needsReview: true, reviewReason: "视频创建接口未返回可查询的任务 ID；上游创建结果待确认", canRetry: false } });
+        expect(mocks.fetchInternalApi).not.toHaveBeenCalled();
+        expect(mocks.createVideoTask).not.toHaveBeenCalled();
     });
 
     it("ends an identified upstream task that explicitly failed with a server response", async () => {
