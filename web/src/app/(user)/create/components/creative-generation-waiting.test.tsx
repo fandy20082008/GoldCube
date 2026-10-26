@@ -41,8 +41,8 @@ describe("creative generation waiting", () => {
             createdAt: Date.now() - 104_000,
         } satisfies CreativeAgentRun;
         const markup = renderToStaticMarkup(<CreativeGenerationWaiting run={run} message={{ content: "正在处理创作任务", createdAt: run.createdAt }} />);
-        expect(markup).toContain("上游是否已接收这次生成尚未确认");
-        expect(markup).toContain("任务已自动暂停");
+        expect(markup).toContain("任务需要检查");
+        expect(markup).toContain("已自动暂停并保留原任务");
         expect(markup).toContain("核实提示：上游创建状态待确认");
         expect(markup).toContain("勿重复提交");
         expect(markup).not.toContain("想继续时叫我");
@@ -50,8 +50,31 @@ describe("creative generation waiting", () => {
         expect(markup).not.toContain("creative-media-waiting-visual");
         expect(markup).not.toContain("animate-pulse");
         expect(renderWaiting("video", "paused")).toContain("任务已暂停，当前进度已保存");
-        expect(renderWaiting("video", "paused")).not.toContain("任务已自动暂停");
+        expect(renderWaiting("video", "paused")).not.toContain("自动暂停");
         expect(renderWaiting("video", "paused")).not.toContain("creative-generation-elapsed");
+    });
+
+    it.each(["running", "paused"] as const)("truthfully explains returned-image persistence review while parent is %s", (status) => {
+        const reason = "图片结果已返回，但在当前模型处理时限内未能完成本地保存，请使用“检查状态”继续保存原结果";
+        const run = {
+            id: "image-review",
+            conversationId: "conversation",
+            inputMessageId: "input",
+            assistantMessageId: "assistant",
+            status,
+            assetIds: [],
+            tasks: [{ id: "image", title: "图片", type: "image", status: "needs_review", error: reason }],
+            createdAt: Date.now() - 600_000,
+        } satisfies CreativeAgentRun;
+        const markup = renderToStaticMarkup(<CreativeGenerationWaiting run={run} message={{ content: "正在处理创作任务", createdAt: run.createdAt }} />);
+        expect(markup).toContain("任务需要检查，已自动暂停并保留原任务");
+        expect(markup).toContain(`核实提示：${reason}`);
+        expect(markup).toContain("勿重复提交");
+        expect(markup).not.toContain("上游是否已接收");
+        expect(markup).not.toContain("尚未确认");
+        expect(markup).not.toContain("creative-generation-elapsed");
+        expect(markup).not.toContain("creative-media-waiting-visual");
+        expect(markup).not.toContain("animate-pulse");
     });
 
     it("shows the responsive ambient placeholder only for active image and video runs", () => {

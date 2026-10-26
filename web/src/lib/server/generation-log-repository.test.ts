@@ -9,7 +9,7 @@ vi.mock("@/lib/server/safe-outbound-fetch", () => ({ fetchSafeOutbound: mocks.fe
 vi.mock("@/lib/server/security", () => ({ isSafeOutboundUrl: vi.fn(() => true) }));
 vi.mock("@/lib/server/object-storage-service", () => ({ deleteExternalMediaObject: vi.fn(), persistExternalMediaIfEnabled: mocks.persistExternalMediaIfEnabled }));
 
-import { normalizeStoredLog, readPostgresGenerationLogDb, writeRemoteAsset } from "./generation-log-repository";
+import { maxServerAssetBytes, normalizeStoredLog, readPostgresGenerationLogDb, writeDataUrlAsset, writeRemoteAsset } from "./generation-log-repository";
 
 const PNG_BYTES = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+4q2JAAAAAElFTkSuQmCC", "base64");
 
@@ -49,6 +49,60 @@ describe("generation log asset normalization", () => {
 
         expect(asset).toMatchObject({ mimeType: "image/png", type: "image" });
         expect(mocks.fetchSafeOutbound).toHaveBeenCalledWith("https://cdn.example.com/result", expect.objectContaining({ redirect: "follow" }));
+    });
+
+    it("persists a real inline image without matching its entire base64 payload", async () => {
+        const originalMatch = String.prototype.match;
+        const match = vi.spyOn(String.prototype, "match").mockImplementation(function (this: string, pattern: Parameters<typeof originalMatch>[0]) {
+            if (String(this).startsWith("data:image/")) throw new RangeError("Maximum call stack size exceeded");
+            return originalMatch.call(this, pattern);
+        });
+        try {
+            const asset = await writeDataUrlAsset(`data:image/png;base64,${PNG_BYTES.toString("base64")}`, "image", { ownerUserId: "user-1", source: "agent", taskId: "fixture-image" });
+
+            expect(asset).toMatchObject({ mimeType: "image/png", type: "image", bytes: PNG_BYTES.length, width: 1, height: 1 });
+            expect(mocks.persistExternalMediaIfEnabled).toHaveBeenCalledWith(expect.objectContaining({ bytes: PNG_BYTES, registration: expect.objectContaining({ ownerUserId: "user-1", taskId: "fixture-image" }) }));
+        } finally {
+            match.mockRestore();
+        }
+    });
+
+    it("preserves a multi-megabyte image byte-for-byte at the existing size limit", async () => {
+        const bytes = Buffer.concat([PNG_BYTES, Buffer.alloc(maxServerAssetBytes("image") - PNG_BYTES.length)]);
+        const asset = await writeDataUrlAsset(`data:image/png;base64,${bytes.toString("base64")}`, "image", { ownerUserId: "user-1", source: "agent" });
+
+        expect(asset).toMatchObject({ mimeType: "image/png", bytes: bytes.length, width: 1, height: 1 });
+        expect((mocks.persistExternalMediaIfEnabled.mock.calls[0][0].bytes as Buffer).equals(bytes)).toBe(true);
+    });
+
+    it("rejects image data above the existing decoded byte limit before persistence", async () => {
+        const bytes = Buffer.alloc(maxServerAssetBytes("image") + 1);
+        await expect(writeDataUrlAsset(`data:image/png;base64,${bytes.toString("base64")}`, "image", { ownerUserId: "user-1", source: "agent" })).resolves.toBeNull();
+        expect(mocks.persistExternalMediaIfEnabled).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        "image/png;base64,YQ==",
+        "data:;base64,YQ==",
+        "data:image/png;charset=utf-8;base64,YQ==",
+        "data:image/png,other;base64,YQ==",
+        "data:image/png;base64,",
+        "data:image/png;base64,YQ==\n",
+        "data:image/png;base64,YQ==\r",
+        "data:image/png;base64,YQ==\u2028",
+        "data:image/png;base64,YQ==\u2029",
+        "data:video/mp4;base64,YQ==",
+    ])("retains rejection of unsupported inline image data: %j", async (value) => {
+        await expect(writeDataUrlAsset(value, "image", { ownerUserId: "user-1", source: "agent" })).resolves.toBeNull();
+        expect(mocks.persistExternalMediaIfEnabled).not.toHaveBeenCalled();
+    });
+
+    it("retains inline video decoding and its media type", async () => {
+        const bytes = Buffer.from("fixture-video");
+        const asset = await writeDataUrlAsset(`data:video/mp4;base64,${bytes.toString("base64")}`, "video", { ownerUserId: "user-1", source: "agent" });
+
+        expect(asset).toMatchObject({ mimeType: "video/mp4", type: "video", bytes: bytes.length });
+        expect(mocks.persistExternalMediaIfEnabled.mock.calls[0][0].bytes).toEqual(bytes);
     });
 
     it("does not persist non-image bytes hidden behind an image task URL", async () => {

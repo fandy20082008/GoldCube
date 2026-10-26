@@ -111,7 +111,7 @@ export function creativeGenerationWaitingCopy({
     needsReview?: boolean;
 }) {
     const progress = progressText.trim();
-    if (needsReview || /上游创建.*待.*确认/.test(progress)) return "上游是否已接收这次生成尚未确认，任务已自动暂停并保留原任务。请先核实原任务状态，勿重复提交，以免重复生成或扣费。";
+    if (needsReview || /上游创建.*待.*确认/.test(progress)) return "任务需要检查，已自动暂停并保留原任务。请根据下方提示检查原任务状态，勿重复提交，以免重复生成或扣费。";
     if (runStatus === "paused" || /任务已暂停/.test(progress)) return "任务已暂停，当前进度已保存。";
     if (/连接暂时中断|无法确认实时状态/.test(progress)) return "主人，连接刚刚有些不稳，不过任务仍在后台继续，我正在替你确认。";
     if (/连接已恢复|恢复连接/.test(progress)) return "主人，连接恢复啦，我会继续守着这次创作。";

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.0.7-custom.17
+
+- Parse generated media data URIs without capturing the complete payload in a regular expression; retain existing size limits and validation.
+- Show the recorded reason for tasks requiring review without implying that all such tasks have unknown upstream submission status. Preserve original results and avoid automatic regeneration.
+
 ## v0.0.7-custom.16
 
 - Preserve Unicode model identities across internal HTTP headers, authorization, billing and polling without changing provider request bodies.

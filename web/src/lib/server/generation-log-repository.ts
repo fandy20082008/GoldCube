@@ -89,11 +89,16 @@ export async function normalizeAssets(assets: Array<Partial<GenerationLogAsset> 
 }
 
 export async function writeDataUrlAsset(dataUrl: string, type: GenerationLogKind, context: GenerationAssetContext): Promise<GenerationLogAsset | null> {
-    const match = dataUrl.match(/^data:([^;,]+);base64,(.+)$/);
-    if (!match) return null;
-    const mimeType = match[1] || (type === "video" ? "video/mp4" : "image/png");
-    if (!mimeType.startsWith(`${type}/`)) return null;
-    const bytes = Buffer.from(match[2], "base64");
+    if (!dataUrl.startsWith("data:")) return null;
+    const headerEnd = dataUrl.indexOf(";");
+    if (headerEnd <= 5 || !dataUrl.startsWith(";base64,", headerEnd)) return null;
+    const mimeType = dataUrl.slice(5, headerEnd);
+    if (mimeType.includes(",") || !mimeType.startsWith(`${type}/`)) return null;
+    // Avoid matching the full payload at the observed production RangeError site.
+    // Keep the existing decoded byte limit and image validation below.
+    const payload = dataUrl.slice(headerEnd + ";base64,".length);
+    if (!payload || payload.includes("\n") || payload.includes("\r") || payload.includes("\u2028") || payload.includes("\u2029")) return null;
+    const bytes = Buffer.from(payload, "base64");
     if (bytes.length > maxServerAssetBytes(type)) return null;
     return writeAssetBytes(bytes, mimeType, type, context);
 }
