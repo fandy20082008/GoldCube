@@ -472,7 +472,10 @@ describe("summarizeStoredAgentPerformance", () => {
 
         expect(String(statement)).toContain("task_type = 'agent'");
         expect(String(statement)).toContain("percentile_disc(0.95)");
-        expect(String(statement)).toContain("payload#>>'{timings,firstResultReadyAt}'");
+        expect(String(statement)).toContain("timings->>'firstResultReadyAt'");
+        expect(String(statement)).toContain("WITH timing_payloads AS MATERIALIZED");
+        expect(String(statement)).toContain("scoped AS MATERIALIZED");
+        expect(String(statement).match(/payload->'timings'/g)).toHaveLength(1);
         expect(String(statement)).toContain("FROM users AS search_users");
         expect(String(statement)).not.toContain("LIMIT 5000");
         expect(params).toEqual(["success", "chat", "project-one", "user-one", "needle"]);

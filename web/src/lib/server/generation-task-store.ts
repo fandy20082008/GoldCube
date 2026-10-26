@@ -255,15 +255,8 @@ export async function summarizeStoredAgentPerformance(options: GenerationTaskRec
     const userId = options.userId?.trim() || null;
     const search = (options.search || "").trim().slice(0, 160);
     const result = await postgresQuery<Record<string, unknown>>(
-        `WITH scoped AS (
-            SELECT
-                ${numericJsonValue("payload#>>'{timings,planningStartedAt}'")} AS planning_started_at,
-                ${numericJsonValue("payload#>>'{timings,planningCompletedAt}'")} AS planning_completed_at,
-                ${numericJsonValue("payload#>>'{timings,requestAcceptedAt}'")} AS request_accepted_at,
-                ${numericJsonValue("payload#>>'{timings,firstTaskSubmittedAt}'")} AS first_task_submitted_at,
-                ${numericJsonValue("payload#>>'{timings,firstResultReadyAt}'")} AS first_result_ready_at,
-                ${numericJsonValue("payload#>>'{timings,allResultsReadyAt}'")} AS all_results_ready_at,
-                ${numericJsonValue("payload#>>'{timings,reviewCompletedAt}'")} AS review_completed_at
+        `WITH timing_payloads AS MATERIALIZED (
+            SELECT payload->'timings' AS timings
             FROM generation_tasks
             WHERE expires_at > now() AND task_type = 'agent'
               AND ($1::text IS NULL OR status = $1)
@@ -280,6 +273,16 @@ export async function summarizeStoredAgentPerformance(options: GenerationTaskRec
                   OR payload::text ILIKE '%' || $5 || '%'
                   OR ${generationTaskUserSearch("generation_tasks.user_id", 5)}
               )
+        ), scoped AS MATERIALIZED (
+            SELECT
+                ${numericJsonValue("timings->>'planningStartedAt'")} AS planning_started_at,
+                ${numericJsonValue("timings->>'planningCompletedAt'")} AS planning_completed_at,
+                ${numericJsonValue("timings->>'requestAcceptedAt'")} AS request_accepted_at,
+                ${numericJsonValue("timings->>'firstTaskSubmittedAt'")} AS first_task_submitted_at,
+                ${numericJsonValue("timings->>'firstResultReadyAt'")} AS first_result_ready_at,
+                ${numericJsonValue("timings->>'allResultsReadyAt'")} AS all_results_ready_at,
+                ${numericJsonValue("timings->>'reviewCompletedAt'")} AS review_completed_at
+            FROM timing_payloads
         ), durations AS (
             SELECT
                 CASE WHEN planning_completed_at >= planning_started_at THEN planning_completed_at - planning_started_at END AS planning_ms,
